@@ -1,12 +1,23 @@
-# Data Flow
+# End-to-end data flow
 
-1. Writer explores using dead reckoning and frontier-based exploration.
-2. Event detected (gas or victim): drop a beacon on a new event, at each junction, and every N meters.
-3. Beacon deposited with a compact packet (see `beacon_packet.md`).
-4. Beacon broadcasts repeatedly over LoRa; confidence decays with age.
-5. Writer returns to the entrance (or low battery) and uploads its log to the gateway.
-6. Gateway translates local coordinates to GPS (see `frame_translation.md`).
-7. Gateway forwards to the command post, which updates the live map.
-8. Command post sends a mission back through the gateway.
-9. Executor is briefed at the entrance, then enters.
-10. Executor follows beacons in order, avoids hazards, corrects drift at each beacon.
+```mermaid
+sequenceDiagram
+  participant W as Writer
+  participant B as Beacons
+  participant G as Gateway (ONA)
+  participant C as Command post
+  participant E as Executor
+  W->>B: explore, drop a beacon at each event, junction and every 10 m
+  loop every 5.5 s + jitter
+    B-->>E: broadcast 15 B (type, position, age)
+  end
+  W->>G: return to the entrance, upload LOG (16 B per beacon, with parentId)
+  Note over G: radio CRC check, local x,y -> lat,lon
+  G->>C: map update (Wi-Fi/MQTT)
+  Note over C: plan route along parent edges, hazard beacons excluded
+  C->>G: mission
+  G->>E: briefing at the entrance (MISSION, 3 + 5n B)
+  E->>B: follow beacons, check age, re-anchor at each beacon
+```
+
+Nothing goes directly between a robot and the command post: every message passes through the gateway.
