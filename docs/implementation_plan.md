@@ -5,22 +5,22 @@ Goal: turn the Phase 1 design and simulation into a working two-robot prototype 
 ## Team split
 | Area | Owner | Scope |
 |------|-------|-------|
-| Software, protocol, command post, docs | Bechir | `livingmap/` (packet, frames, command post, live map), gateway software, simulation, report, manual, repo |
-| Embedded, hardware, robots | Teammate | `firmware/` (Writer, beacon, gateway, Executor), LoRa, sensors, motors, chassis, beacon dropper |
+| Software, protocol, command post, docs | Software lead | `livingmap/` (packet, frames, command post, live map), gateway software, simulation, report, manual, repo |
+| Embedded, hardware, robots | Embedded lead | `firmware/` (Writer, beacon, gateway, Executor), LoRa, sensors, motors, chassis, beacon dropper |
 | Shared | Both | Integration tests, field test, demo video, pitch |
 
-To avoid merge conflicts, Bechir edits `livingmap/` and `docs/`, and the teammate edits `firmware/`. Always `git pull --rebase origin main` before pushing.
+To avoid merge conflicts, Software lead edits `livingmap/` and `docs/`, and the embedded lead edits `firmware/`. Always `git pull --rebase origin main` before pushing.
 
 ## Timeline
 | Week | Dates | Milestone | Owner | Done when |
 |------|-------|-----------|-------|-----------|
 | 0 | to 05/10 | Phase 1 submission: repo, simulation, report, failure cases, plan | Both | Submitted before the deadline |
-| 1 | 06-12/10 | Order or collect parts; confirm the legal LoRa band in Tunisia; test airtime and range; port `beacon.py` packet to C/C++ | Teammate / Bechir | Parts in hand; two ESP32+LoRa nodes exchange a 16-byte packet with a valid CRC |
-| 2 | 13-19/10 | Beacon firmware: periodic broadcast, jitter, battery sleep. Gateway firmware: LoRa receive and Wi-Fi/MQTT forward | Teammate / Bechir | Gateway forwards a beacon to the command-post software over MQTT |
-| 3 | 20-26/10 | Writer base: chassis, motors, odometry/IMU dead reckoning, obstacle sensing, corridor following | Teammate | Writer drives a straight and branching test track |
-| 3 | 20-26/10 | Command post: live map from MQTT, GPS conversion, mission planner, briefing message | Bechir | Map updates live from gateway test data |
-| 4 | 27/10-02/11 | Event sensing (gas sensor, victim detection) and beacon-drop mechanism | Teammate | Writer detects both events and drops a beacon, with the packet carrying the right type and position |
-| 4 | 27/10-02/11 | Writer exploration logic ported from the simulation; clock sync; log upload at the entrance | Bechir / Teammate | Writer explores the test track and uploads its log through the gateway |
+| 1 | 06-12/10 | Order or collect parts; confirm the legal LoRa band in Tunisia; test airtime and range; port `beacon.py` packet to C/C++ | Embedded lead / Software lead | Parts in hand; two ESP32+LoRa nodes exchange a 16-byte packet with a valid CRC |
+| 2 | 13-19/10 | Beacon firmware: periodic broadcast, jitter, battery sleep. Gateway firmware: LoRa receive and Wi-Fi/MQTT forward | Embedded lead / Software lead | Gateway forwards a beacon to the command-post software over MQTT |
+| 3 | 20-26/10 | Writer base: chassis, motors, odometry/IMU dead reckoning, obstacle sensing, corridor following | Embedded lead | Writer drives a straight and branching test track |
+| 3 | 20-26/10 | Command post: live map from MQTT, GPS conversion, mission planner, briefing message | Software lead | Map updates live from gateway test data |
+| 4 | 27/10-02/11 | Event sensing (gas sensor, victim detection) and beacon-drop mechanism | Embedded lead | Writer detects both events and drops a beacon, with the packet carrying the right type and position |
+| 4 | 27/10-02/11 | Writer exploration logic ported from the simulation; clock sync; log upload at the entrance | Software lead / Embedded lead | Writer explores the test track and uploads its log through the gateway |
 | 5 | 03-09/11 | Executor: briefing reception at entrance, beacon reading (RSSI/ID), beacon-to-beacon navigation, re-anchoring, hazard avoidance | Both | Executor follows beacons to the victim marker on the test track |
 | 6 | 10-16/11 | Full integration on one mock environment (a small tunnel model with a loop, a gas source, and a victim target) | Both | Complete system chain runs end to end |
 | 7 | 17-23/11 | Failure tests (remove a beacon, kill the Writer, corrupt a packet, drop the gateway); fix bugs | Both | Each documented failure case demonstrated or covered |
@@ -44,4 +44,4 @@ Buffer: weeks 7-8 absorb slips. The riskiest items (LoRa range inside real tunne
 | Dead-reckoning drift on real hardware is larger than simulated | Beacon positions inaccurate | Add an IMU, and rely on re-anchoring at beacons |
 | Beacon-drop mechanism unreliable | Missing beacons | Simple servo-based design; test early; spacing redundancy |
 | Integration issues | Late surprises | Weekly integration test from week 2 |
-| Teammate unavailable | One-person bottleneck | Keep the firmware modular and documented; the simulation stays as a fallback demo |
+| Embedded lead unavailable | One-person bottleneck | Keep the firmware modular and documented; the simulation stays as a fallback demo |
