@@ -6,11 +6,13 @@ A two-robot system that gives an unmapped, GPS-denied space its own memory. A **
 
 > Status: Phase 1 (initial phase) submitted.
 
+![Simulation demo](demo/demo.gif)
+
 ## Chosen scenario
 
 - **Environment:** Mines / Tunnels
 - **Event types:** hazardous gas, victim detected
-- **Radio:** LoRa (433/868 MHz, to be verified for Tunisia)
+- **Radio:** LoRa (868 MHz, 433 MHz fallback; legal band for Tunisia still to be confirmed)
 - **Outside Network Area:** ESP32 + LoRa gateway at the tunnel entrance, forwarding over Wi-Fi/MQTT (satellite in a real deployment)
 
 ## System chain
@@ -38,23 +40,17 @@ flowchart LR
   FT -- "Wi-Fi/MQTT" --> CP
   CP -- "mission" --> GW
   GW -- "briefing before entry" --> E
-```
-
 Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
 
-## Repository layout
+Quick start (simulation)
+Requires Python 3.10+.
 
-| Path | Content |
-|---|---|
-...
-## Team
+////
+py -m pip install -r requirements.txt
+py -m pytest                                   # 31 tests
+py run_demo.py                                 # live window
+py run_demo.py --gif demo/demo.gif --no-show   # save the animation
+Seed 7 result: 13 beacons dropped, Writer drift 1.38 m after about 250 m, the command post routes around the gas plume, and the Executor, deployed 15 minutes later, reaches the victim beacon with 0 gas exposure and 10 % of radio frames lost.
 
-- Team **Winek?**: software lead + embedded lead
-
-## License
-
+License
 MIT
-
-
-
-
