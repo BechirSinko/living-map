@@ -4,7 +4,7 @@ TSYP14 Technical Challenge (IEEE RAS x IEEE AESS, Tunisia Section Chapters)
 
 A two-robot system that gives an unmapped, GPS-denied space its own memory. A **Writer** robot explores a tunnel and leaves small LoRa **beacons** that store what it found. An **Executor** robot later follows the beacons to finish the mission, without starting from zero.
 
-> Status: Phase 1 (initial phase) in progress.
+> Status: Phase 1 (initial phase) submitted.
 
 ## Chosen scenario
 
@@ -55,3 +55,4 @@ Rule: no direct link between any robot and the command post. Everything passes t
 ## License
 
 MIT
+
