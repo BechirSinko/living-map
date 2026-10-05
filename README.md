@@ -50,9 +50,11 @@ Rule: no direct link between any robot and the command post. Everything passes t
 ## Team
 
 - Team **Winek?**: software lead + embedded lead
-- Memberships: TODO (counts only)
 
 ## License
 
 MIT
+
+
+
 
