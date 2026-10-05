@@ -7,3 +7,7 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+
+repo_dump.txt
+dump_*.txt
+*.zip
