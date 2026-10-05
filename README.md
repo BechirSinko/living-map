@@ -1,4 +1,4 @@
-﻿# The Living Map: Spatial Memory for Emergency Robots
+# The Living Map: Spatial Memory for Emergency Robots
 
 TSYP14 Technical Challenge (IEEE RAS x IEEE AESS, Tunisia Section Chapters)
 
@@ -44,15 +44,36 @@ flowchart LR
 
 Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
 
-Quick start (simulation)
+## Quick start (simulation)
+
 Requires Python 3.10+.
 
-////
+```
 py -m pip install -r requirements.txt
 py -m pytest                                   # 31 tests
 py run_demo.py                                 # live window
 py run_demo.py --gif demo/demo.gif --no-show   # save the animation
+```
+
 Seed 7 result: 13 beacons dropped, Writer drift 1.38 m after about 250 m, the command post routes around the gas plume, and the Executor, deployed 15 minutes later, reaches the victim beacon with 0 gas exposure and 10 % of radio frames lost.
 
-License
+## Repository layout
+
+| Path | Content |
+|---|---|
+| `livingmap/beacon.py` | Beacon, LOG and MISSION frames, aging law (same layout as the firmware) |
+| `livingmap/frames.py` | Local frame <-> GPS translation |
+| `livingmap/sim.py` | End-to-end simulation: world, Writer, gateway, command post, Executor, animation |
+| `run_demo.py` | Command-line entry point for the simulation |
+| `tests/` | pytest suite (packets, frames, simulation) |
+| `docs/` | Architecture, data flow, packet design, frame translation, failure cases, plan, report |
+| `demo/` | Simulation recording |
+| `firmware/` | ESP32 + SX1276 firmware (PlatformIO), Phase 2 prototype in progress |
+
+## Team
+
+- Team **Winek?**: software lead + embedded lead
+
+## License
+
 MIT
