@@ -1,23 +1,23 @@
-"""Beacon packets, byte-for-byte compatible with firmware/common/beacon_msg.h.
+"""Beacon packets, byte-for-byte compatible with firmware/include/beacon_msg.h.
 
-BeaconMsg, 14 bytes, little-endian (ESP32 sends the packed struct as-is):
+Wire frame = [type:1][BeaconMsg:14], little-endian, packed (15 B on air):
 
-  off size field       notes
-  --- ---- ----------  ------------------------------------------------
-   0   1   type        PktType (1 = BEACON)
-   1   1   beaconId    1..254
-   2   1   eventType   0 none/waypoint, 1 gas, 2 victim
-   3   1   nextHopId   next beacon in drop order, 0xFF = end of chain
-   4   2   x_cm        int16, private frame, cm
-   6   2   y_cm        int16
-   8   2   bearingDeg  int16, 0..359, Writer heading when the beacon was dropped
-  10   4   ageS        uint32, seconds since the event was recorded
+  off size field        notes
+  --- ---- -----------  ------------------------------------------------
+   0   1   type         PKT_BEACON = 1 (LOG = 2, MISSION = 3)
+   1   1   version      1
+   2   1   beaconId     1..254
+   3   1   eventType    0 none/waypoint, 1 victim, 2 gas, 3 blocked
+   4   1   nextHopId    next beacon in drop order, 0xFF = none
+   5   2   x_cm         int16, private frame, cm
+   7   2   y_cm         int16
+   9   2   bearingDeg   int16, 0..359, Writer heading when the beacon was dropped
+  11   4   ageAtWriteS  uint32, seconds since the event was recorded
 
-There is no CRC field: the SX1276 hardware CRC (RadioLib setCRC(true)) drops corrupted frames.
+LOG     = [type=2][BeaconMsg:14][parentId:1]                 (16 B)
+MISSION = [type=3][targetEvent:1][n:1][n x (beaconId u8, x_cm i16, y_cm i16)]   (3 + 5n B, n <= 48)
 
-Also defined here (proposed, to be added to beacon_msg.h):
-  LOG     15 B = a BeaconMsg with type=PKT_LOG, plus parentId (tree edge for route planning)
-  MISSION type | targetEvent | n | n x (beaconId u8, x_cm i16, y_cm i16)   (3 + 5n bytes, n <= 50)
+There is no application CRC: radio.setCRC(true) on every node, bad frames are dropped by the SX1276.
 """
 from __future__ import annotations
 
@@ -26,23 +26,25 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 
-PKT_BEACON, PKT_WRITE, PKT_LOG, PKT_MISSION = 1, 2, 3, 4
-PACKET_SIZE = 14
-LOG_SIZE = 15
+PKT_BEACON, PKT_LOG, PKT_MISSION = 1, 2, 3
+VERSION = 1
+PACKET_SIZE = 15      # [type][BeaconMsg:14]
+LOG_SIZE = 16         # [type][BeaconMsg:14][parentId]
 NONE_ID = 0xFF
-MAX_ROUTE = 50
-_FMT = "<BBBBhhhI"
+MAX_ROUTE = 48        # 3 + 5*48 = 243 B, under the SX1276 255 B FIFO
+_FMT = "<BBBBBhhhI"
 assert struct.calcsize(_FMT) == PACKET_SIZE
 
 
 class EventType(IntEnum):
     NONE = 0      # waypoint, no event
-    GAS = 1
-    VICTIM = 2
+    VICTIM = 1
+    GAS = 2
+    BLOCKED = 3   # reserved (not used by the simulation)
 
 
 # One rule for the whole project: confidence = exp(-age / tau). Waypoints do not decay.
-TAU_S = {EventType.GAS: 600.0, EventType.VICTIM: 1800.0}
+TAU_S = {EventType.GAS: 600.0, EventType.VICTIM: 1800.0, EventType.BLOCKED: 1800.0}
 STALE_THRESHOLD = 0.3   # below this: verify before trusting
 
 
@@ -70,8 +72,8 @@ class Beacon:
             raise PacketError("beacon_id must be 1..254")
         if not 0 <= self.next_hop <= 255:
             raise PacketError("next_hop must be 0..255")
-        if not 0 <= int(self.event_type) <= 2:
-            raise PacketError("event_type must be 0..2")
+        if not 0 <= int(self.event_type) <= 3:
+            raise PacketError("event_type must be 0..3")
         if not 0 <= self.bearing_deg <= 359:
             raise PacketError("bearing_deg must be 0..359")
         if not 0 <= self.age_s <= 0xFFFFFFFF:
@@ -79,7 +81,7 @@ class Beacon:
         x_cm, y_cm = round(self.x * 100), round(self.y * 100)
         if not (-32768 <= x_cm <= 32767 and -32768 <= y_cm <= 32767):
             raise PacketError("position out of range (+-327 m from entrance)")
-        return struct.pack(_FMT, pkt_type, self.beacon_id, int(self.event_type),
+        return struct.pack(_FMT, pkt_type, VERSION, self.beacon_id, int(self.event_type),
                            self.next_hop, x_cm, y_cm, self.bearing_deg, int(self.age_s))
 
     def pack(self) -> bytes:
@@ -89,9 +91,11 @@ class Beacon:
     def _unpack(cls, data: bytes, want_type: int) -> "Beacon":
         if len(data) != PACKET_SIZE:
             raise PacketError(f"expected {PACKET_SIZE} bytes, got {len(data)}")
-        t, bid, et, nxt, x_cm, y_cm, brg, age = struct.unpack(_FMT, data)
+        t, ver, bid, et, nxt, x_cm, y_cm, brg, age = struct.unpack(_FMT, data)
         if t != want_type:
             raise PacketError(f"unexpected packet type {t}")
+        if ver != VERSION:
+            raise PacketError(f"unsupported version {ver}")
         if not 1 <= bid <= 254:
             raise PacketError("bad beacon id")
         try:
