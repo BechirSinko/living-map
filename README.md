@@ -40,6 +40,8 @@ flowchart LR
   FT -- "Wi-Fi/MQTT" --> CP
   CP -- "mission" --> GW
   GW -- "briefing before entry" --> E
+```
+
 Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
 
 Quick start (simulation)
