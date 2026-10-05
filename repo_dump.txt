@@ -1,0 +1,1736 @@
+
+===== FILE: .gitignore =====
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+
+===== FILE: LICENSE =====
+
+MIT License
+
+Copyright (c) 2026 The Living Map team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+===== FILE: README.md =====
+
+# The Living Map: Spatial Memory for Emergency Robots
+
+TSYP14 Technical Challenge (IEEE RAS x IEEE AESS, Tunisia Section Chapters)
+
+A two-robot system that gives an unmapped, GPS-denied space its own memory. A **Writer** robot explores a tunnel and leaves small LoRa **beacons** that store what it found. An **Executor** robot later follows the beacons to finish the mission, without starting from zero.
+
+> Status: Phase 1 (initial phase) submitted.
+
+## Chosen scenario
+
+- **Environment:** Mines / Tunnels
+- **Event types:** hazardous gas, victim detected
+- **Radio:** LoRa (433/868 MHz, to be verified for Tunisia)
+- **Outside Network Area:** ESP32 + LoRa gateway at the tunnel entrance, forwarding over Wi-Fi/MQTT (satellite in a real deployment)
+
+## System chain
+
+Writer explores -> events detected and beacons deposited -> Outside Network Area receives and translates -> wireless/satellite link -> Command Post -> Executor briefed -> Executor navigates using beacons.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph INSIDE["INSIDE: GPS-denied tunnel"]
+    W["Writer Robot<br/>explore + sense + drop"]
+    B["Beacon chain<br/>B1 -> B2 -> ... -> Bn<br/>(LoRa broadcast, aging)"]
+    E["Executor Robot<br/>beacon-guided navigation"]
+  end
+  subgraph ONA["OUTSIDE NETWORK AREA (tunnel entrance)"]
+    GW["LoRa Gateway (ESP32)"]
+    FT["Frame translation<br/>local x,y -> lat,lon"]
+  end
+  CP["COMMAND POST<br/>live map + mission planner"]
+  W -- "drops beacons" --> B
+  W -- "log upload (LoRa)" --> GW
+  B -- "RF broadcast" --> E
+  GW --> FT
+  FT -- "Wi-Fi/MQTT" --> CP
+  CP -- "mission" --> GW
+  GW -- "briefing before entry" --> E
+```
+
+Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
+
+## Repository layout
+
+| Path | Content |
+|---|---|
+...
+## Team
+
+- Team **Winek?**: software lead + embedded lead
+
+## License
+
+MIT
+
+
+
+
+
+
+===== FILE: demo/.gitkeep =====
+
+
+===== FILE: docs/architecture.md =====
+
+# Technical Solution and Architecture
+
+## Zones
+- **Inside (tunnel):** Writer, beacon chain, Executor. No GPS, no network.
+- **Outside Network Area (ONA):** ESP32 + LoRa gateway at the entrance. Receives, translates to GPS, forwards.
+- **Command post:** laptop with live map and mission planner.
+
+## Diagram
+See the Mermaid diagram in the root `README.md`. Export a PNG to `docs/diagrams/` for the report.
+
+## Component responsibilities
+| Component | Responsibility | Tech (proposed) |
+|---|---|---|
+| Writer | Autonomous exploration, sensing, beacon deployment | ESP32, encoders, IMU, ultrasonic/lidar, gas sensor, PIR/thermal |
+| Beacon | Store and broadcast one packet, age it | MCU + LoRa SX1276, battery |
+| ONA gateway | Receive, translate, forward, brief | ESP32 + LoRa, Wi-Fi/MQTT |
+| Command post | Live map, mission definition | Python + web map |
+| Executor | Receive mission, follow beacons, avoid hazards | Same chassis family as Writer, LoRa receiver |
+
+## Key design decisions
+1. Memory lives in the beacons, not in the Writer.
+2. The gateway does frame translation, robots only use their private frame.
+3. Beacons are dumb broadcasters and do not relay to each other.
+
+
+===== FILE: docs/beacon_packet.md =====
+
+# Beacon Message and Signal Design
+
+A beacon is a small battery-powered LoRa node dropped by the Writer. It stores one packet and
+rebroadcasts it. The packet answers the three questions from the challenge:
+**what was found**, **where to go**, and **when it was written**.
+
+## Packet layout (16 bytes, big-endian)
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 1 | `beacon_id` | This beacon (1..254) |
+| 1 | 1 | `type_flags` | High nibble: event type. Low nibble: flags |
+| 2 | 1 | `prev_id` | Previous beacon in the chain (0xFF = none) |
+| 3 | 1 | `next_id` | Next beacon toward the target (0xFF = none) |
+| 4 | 2 | `x_cm` | int16, local x in cm (range +-327 m) |
+| 6 | 2 | `y_cm` | int16, local y in cm |
+| 8 | 4 | `timestamp` | uint32 Unix seconds, when written |
+| 12 | 1 | `confidence` | uint8, 0..255 maps to 0.0..1.0 |
+| 13 | 1 | `value` | uint8 event magnitude (gas level, victim signal) |
+| 14 | 2 | `crc16` | CRC-16/CCITT-FALSE over bytes 0..13 |
+
+| Question | Fields |
+|---|---|
+| What was found | `type_flags`, `value`, `confidence` |
+| Where to go | `x_cm`, `y_cm`, `prev_id`, `next_id` |
+| When it was written | `timestamp` |
+
+**Event types:** 0 waypoint, 1 gas, 2 victim, 3 blocked.
+**Flags:** 0x1 junction, 0x2 dead end, 0x4 hazard ahead, 0x8 entrance.
+
+## Why this design
+- **16 bytes** is tiny: at LoRa SF7/125 kHz the airtime is roughly 50 ms (with the LoRa header), so beacons can broadcast every few seconds without hogging the channel. Verify the airtime with a LoRa calculator once the radio settings are chosen.
+- **Centimeter integers** instead of floats: 2 bytes per axis, and encode/decode is identical on ESP32 and Python.
+- **Local coordinates only.** Beacons never hold GPS, so no beacon needs a GPS fix and the robots stay in their private frame. The gateway translates.
+- **Chain pointers** (`prev_id`/`next_id`) let the Executor follow the trail even if one beacon is missed, since neighbours still point past it.
+- **CRC-16** rejects corrupted packets (all single-bit errors are detected, tested in `tests/test_beacon.py`).
+
+## Aging mechanism
+The reader computes the age from `timestamp` and decays the confidence exponentially:
+
+`confidence(now) = confidence0 * 0.5 ^ ((now - timestamp) / half_life)`
+
+| Event | Half-life | Reason |
+|---|---|---|
+| Gas | 10 min | Gas disperses or spreads quickly |
+| Blocked path | 30 min | Debris may shift or be cleared |
+| Victim | 1 h | A victim stays put but their status changes |
+| Waypoint | 24 h | Geometry barely changes |
+
+If the aged confidence drops below **0.25** the info is *stale*: the Executor still uses the beacon as a
+landmark but treats the hazard as "verify before trusting" and re-checks it with its own sensors.
+
+Timestamp note: the Writer's clock is set at the entrance from the gateway before it enters, so all devices share
+the same time base. Without it, ages would be meaningless.
+
+## Signal design (RF)
+- LoRa, 433 or 868 MHz (confirm the allowed band in Tunisia). Initial settings: SF7, BW 125 kHz, CR 4/5, to be tuned by range tests in Phase 2.
+- Each beacon broadcasts every ~5 s with a small random jitter so neighbouring beacons do not collide repeatedly.
+- No acknowledgements: beacons are simple one-way broadcasters.
+
+## Reference code
+`livingmap/beacon.py` (`Beacon.pack`, `Beacon.unpack`, `aged_confidence`, `is_stale`).
+Port the same layout to C/C++ for the firmware.
+
+
+===== FILE: docs/data_flow.md =====
+
+# Data Flow
+
+1. Writer explores using dead reckoning and frontier-based exploration.
+2. Event detected (gas or victim): drop a beacon on a new event, at each junction, and every N meters.
+3. Beacon deposited with a compact packet (see `beacon_packet.md`).
+4. Beacon broadcasts repeatedly over LoRa; confidence decays with age.
+5. Writer returns to the entrance (or low battery) and uploads its log to the gateway.
+6. Gateway translates local coordinates to GPS (see `frame_translation.md`).
+7. Gateway forwards to the command post, which updates the live map.
+8. Command post sends a mission back through the gateway.
+9. Executor is briefed at the entrance, then enters.
+10. Executor follows beacons in order, avoids hazards, corrects drift at each beacon.
+
+
+===== FILE: docs/diagrams/.gitkeep =====
+
+
+===== FILE: docs/failure_cases.md =====
+
+# Failure Cases
+
+Design principle: **memory lives in the beacons, not in the robots**, and every link in the chain has a degraded mode. "Sim" marks cases demonstrated in `livingmap/sim.py`.
+
+| # | Failure | Effect | Detection | Mitigation / degraded mode | Sim |
+|---|---------|--------|-----------|----------------------------|-----|
+| 1 | **Writer dies or is stuck** (battery, jam, rockfall) | Log never uploaded | Gateway receives no upload before a timeout; Writer stops broadcasting position | Beacons already hold the map. The Executor follows next-hop pointers inward from the first beacon, so it needs no log. Command post marks the unexplored area as unknown. | Route is derived from `prev` pointers |
+| 2 | **Low battery on Writer** | Mission cut short | Battery threshold (e.g. 30 %) | Writer stops exploring, returns to the entrance and uploads. The return trip is budgeted at the explore distance plus a margin. | - |
+| 3 | **A beacon is lost, destroyed or dead** | Gap in the chain | Executor reaches the expected position and hears nothing within range; `prev` chain has a missing ID | Executor dead-reckons toward the next known beacon, using the coordinates from its briefing. It stops after a bounded search and reports "chain broken". Waypoints every N m limit the gap size. | - |
+| 4 | **Beacon battery runs out** | Silent beacon | Same as #3 | Low-duty broadcast (about every 5 s) and a battery-sized lifetime target. Aging already lowers trust over time. | - |
+| 5 | **RF collisions / interference** (many beacons in range, tunnel multipath, jamming) | Lost or garbled packets | CRC-16 mismatch; missing sequence of IDs | Randomised broadcast jitter, short airtime, retry on next broadcast. The Executor only needs one clean copy per beacon. | CRC corruption injected at 10 %; Executor retries |
+| 6 | **Bit errors / corrupted packet** | Wrong position or type | CRC-16/CCITT-FALSE on bytes 0..13 | Packet dropped, never trusted. The gateway also drops bad packets. | Yes |
+| 7 | **Stale information** (gas dispersed, victim moved) | Executor acts on old data | Confidence ages as `c0 * 0.5^(age/half_life)`; below 0.25 marked "verify before trusting" | Executor re-senses locally. Hazard beacons are still avoided but flagged stale at the command post. | Gas beacon shown at 0.24 after 15 min |
+| 8 | **Dead-reckoning drift** (wheel slip, heading bias) | Beacon coordinates are wrong in the local frame | Mismatch when the Executor reaches a beacon | Executor re-anchors to beacon coordinates at every beacon, so error does not accumulate. Beacon spacing bounds the worst case. | Drift 1.4 m; corrections logged |
+| 9 | **Bad GPS anchor or heading** (entrance GPS error, wrong compass bearing) | Whole map shifted or rotated on the command-post map. 1 degree is about 1.7 m per 100 m. | Cross-check with known landmarks, repeated GPS fixes, comparison of two surveys | Average several GPS fixes at the entrance. Anchor is surveyed, not guessed. Robots never use GPS, so navigation is unaffected; only the displayed map is. | - |
+| 10 | **Writer clock not synced** | Wrong timestamps, wrong aging | Timestamp far from gateway time at upload | Time sync from the gateway at the entrance. The gateway can re-time-stamp using the receive time. | `time_sync` message |
+| 11 | **Gateway down or Wi-Fi/MQTT link lost** | Command post blind, Executor not briefed | Heartbeat timeout at the command post | Gateway buffers uploads and retries. Backup uplink (satellite or cellular). Executor can still be briefed locally with a stored mission. | - |
+| 12 | **Direct robot-to-command-post link attempted** | Rule violation | Message bus | Forbidden by design: the simulation bus raises `PermissionError`. | Tested |
+| 13 | **Gas or hazard blocks the only route** | No safe path to the victim | Planner finds no path avoiding hazard beacons | Command post reports "no safe route" and waits or requests re-survey. The Executor never enters a hazard zone by default. | Gas edge avoided via bypass |
+| 14 | **Executor drifts off the corridor or gets lost** | Misses beacons | No beacon heard within expected distance | Stop, back-track to the last confirmed beacon, retry. Abort after a bounded number of tries. | - |
+| 15 | **Wrong or duplicate beacon ID** | Confusing route | Duplicate IDs in the log | IDs assigned sequentially by the Writer and checked at the gateway. Chain consistency check. | - |
+
+
+
+
+===== FILE: docs/frame_translation.md =====
+
+# Frame Translation
+
+Robots work in a **private frame**; humans and the command post need **real GPS**. The gateway
+converts between the two, so the robots never need to know GPS.
+
+## Local frame
+- Origin: the tunnel entrance, the one point with a known GPS fix.
+- +x: the direction the Writer faced at start.
+- +y: 90 degrees to the left of +x (counter-clockwise).
+- Units: meters.
+
+## Anchor
+Measured once at the entrance and stored in the gateway: `(lat0, lon0, heading_deg)`, where
+`heading_deg` is the compass bearing of +x (degrees clockwise from true north). The heading can be read from a
+magnetometer (corrected for magnetic declination) or taken from the entrance geometry on a map.
+
+## Math
+Step 1, rotate local meters into East/North meters:
+
+```
+East  =  x*sin(psi) - y*cos(psi)
+North =  x*cos(psi) + y*sin(psi)
+```
+
+Step 2, convert meters to degrees with WGS-84 meters-per-degree at `lat0`:
+
+```
+m_lat = 111132.92 - 559.82*cos(2*lat0) + 1.175*cos(4*lat0)
+m_lon = 111412.84*cos(lat0) - 93.5*cos(3*lat0)
+lat = lat0 + North / m_lat
+lon = lon0 + East  / m_lon
+```
+
+The inverse (`gps_to_local`) is used to send the Executor mission targets back in its own frame.
+
+Sanity checks: with heading 0, +x points north and +y points west. With heading 90, +x points east and
++y points north. Both are covered in `tests/test_frames.py`.
+
+## Accuracy and error sources
+| Source | Effect | Mitigation |
+|---|---|---|
+| Dead-reckoning drift (encoders, IMU) | Position error grows with distance | Beacons act as landmarks; the Executor re-anchors at each beacon |
+| Wrong entrance heading | Error grows linearly with distance (1 degree = 1.7 m per 100 m) | Measure heading carefully, cross-check with a map |
+| Entrance GPS error (a few m) | Constant offset on the whole map | Use a good fix, average multiple readings |
+| Flat-earth approximation | Under a centimeter over 300 m | None needed at tunnel scale |
+
+## Reference code
+`livingmap/frames.py`: `local_to_gps`, `gps_to_local`, `local_to_enu`, `enu_to_local`.
+
+
+===== FILE: docs/implementation_plan.md =====
+
+# Implementation Plan
+
+Goal: turn the Phase 1 design and simulation into a working two-robot prototype (Writer + Executor), beacons, and an Outside Network Area (ONA) gateway by the final deadline **01/12/2026**.
+
+## Team split
+| Area | Owner | Scope |
+|------|-------|-------|
+| Software, protocol, command post, docs | Software lead | `livingmap/` (packet, frames, command post, live map), gateway software, simulation, report, manual, repo |
+| Embedded, hardware, robots | Embedded lead | `firmware/` (Writer, beacon, gateway, Executor), LoRa, sensors, motors, chassis, beacon dropper |
+| Shared | Both | Integration tests, field test, demo video, pitch |
+
+To avoid merge conflicts, Software lead edits `livingmap/` and `docs/`, and the embedded lead edits `firmware/`. Always `git pull --rebase origin main` before pushing.
+
+## Timeline
+| Week | Dates | Milestone | Owner | Done when |
+|------|-------|-----------|-------|-----------|
+| 0 | to 05/10 | Phase 1 submission: repo, simulation, report, failure cases, plan | Both | Submitted before the deadline |
+| 1 | 06-12/10 | Order or collect parts; confirm the legal LoRa band in Tunisia; test airtime and range; port `beacon.py` packet to C/C++ | Embedded lead / Software lead | Parts in hand; two ESP32+LoRa nodes exchange a 16-byte packet with a valid CRC |
+| 2 | 13-19/10 | Beacon firmware: periodic broadcast, jitter, battery sleep. Gateway firmware: LoRa receive and Wi-Fi/MQTT forward | Embedded lead / Software lead | Gateway forwards a beacon to the command-post software over MQTT |
+| 3 | 20-26/10 | Writer base: chassis, motors, odometry/IMU dead reckoning, obstacle sensing, corridor following | Embedded lead | Writer drives a straight and branching test track |
+| 3 | 20-26/10 | Command post: live map from MQTT, GPS conversion, mission planner, briefing message | Software lead | Map updates live from gateway test data |
+| 4 | 27/10-02/11 | Event sensing (gas sensor, victim detection) and beacon-drop mechanism | Embedded lead | Writer detects both events and drops a beacon, with the packet carrying the right type and position |
+| 4 | 27/10-02/11 | Writer exploration logic ported from the simulation; clock sync; log upload at the entrance | Software lead / Embedded lead | Writer explores the test track and uploads its log through the gateway |
+| 5 | 03-09/11 | Executor: briefing reception at entrance, beacon reading (RSSI/ID), beacon-to-beacon navigation, re-anchoring, hazard avoidance | Both | Executor follows beacons to the victim marker on the test track |
+| 6 | 10-16/11 | Full integration on one mock environment (a small tunnel model with a loop, a gas source, and a victim target) | Both | Complete system chain runs end to end |
+| 7 | 17-23/11 | Failure tests (remove a beacon, kill the Writer, corrupt a packet, drop the gateway); fix bugs | Both | Each documented failure case demonstrated or covered |
+| 8 | 24/11-01/12 | Documentation: user manual, final report, diagrams, updated repo, pitch (5 min + 2 min Q&A) and demo video | Both | Final submission delivered by 01/12 |
+
+Buffer: weeks 7-8 absorb slips. The riskiest items (LoRa range inside real tunnels, the beacon-drop mechanism, drift on the real chassis) are scheduled early in weeks 1-4.
+
+## Hardware list (to confirm and budget)
+- 2 mobile robot chassis with motors, encoders and an IMU (Writer, Executor)
+- ESP32 + SX1276 LoRa modules: at least 1 per robot, 1 gateway, 6-10 for beacons
+- Gas sensor (e.g. MQ-series) for the hazardous gas event; victim detection via thermal or PIR, or a marker as a stand-in
+- Distance/obstacle sensors (ultrasonic or ToF)
+- Servo-based beacon dropper on the Writer
+- Batteries, chargers, a small router or laptop for the command post
+
+## Risks
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| Components arrive late | Delays all firmware work | Order in week 1; start with ESP32 dev boards the team already has |
+| LoRa band legality or range problems | Radio link unreliable or non-compliant | Verify the band with the regulator early; test range in a corridor or stairwell |
+| Dead-reckoning drift on real hardware is larger than simulated | Beacon positions inaccurate | Add an IMU, and rely on re-anchoring at beacons |
+| Beacon-drop mechanism unreliable | Missing beacons | Simple servo-based design; test early; spacing redundancy |
+| Integration issues | Late surprises | Weekly integration test from week 2 |
+| Embedded lead unavailable | One-person bottleneck | Keep the firmware modular and documented; the simulation stays as a fallback demo |
+
+
+===== FILE: docs/report/.gitkeep =====
+
+
+===== FILE: firmware/.gitignore =====
+
+.pio/
+.vscode/
+include/secrets.h
+
+===== FILE: firmware/README.md =====
+
+# Firmware (PlatformIO)
+
+One project, one environment per program. Shared radio settings and packet formats: `include/beacon_msg.h`
+(edit it in one place, all programs pick it up).
+
+| Environment | Program | Board |
+|---|---|---|
+| beacon1, beacon2, beacon3 | `src/beacon` (ID set in `platformio.ini`) | ESP32 + SX1276 |
+| gateway | `src/gateway` | ESP32 + SX1276 |
+| receiver | `src/receiver` (Executor listening side) | ESP32 + SX1276 |
+| writer | `src/writer` (WRITE + servo drop) | ESP32 + SX1276 + servo |
+
+## Commands
+
+```
+pio run -e gateway                          # build
+pio run -e beacon2 -t upload                # build and flash
+pio run -e beacon2 -t upload --upload-port COM5   # when several boards are plugged in
+pio device monitor -b 115200                # serial monitor
+```
+
+Before building the gateway, copy `include/secrets.example.h` to `include/secrets.h` (git-ignored) and fill in the Wi-Fi name and password, the MQTT broker and the tunnel entrance GPS. `HEADING_DEG` is the compass bearing of the local +x axis, clockwise from true north.
+
+
+===== FILE: firmware/include/beacon_msg.h =====
+
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+
+// ---------------------------------------------------------------------------
+// Radio configuration (SX1276 / RFM95)
+// Verify 433 vs 868 MHz for Tunisia before final deployment.
+// ---------------------------------------------------------------------------
+#define LORA_FREQ_MHZ     868.0
+#define LORA_BW_KHZ       125.0
+#define LORA_SF           7
+#define LORA_CR           5       // 4/5
+#define LORA_SYNC_WORD    0x12
+#define LORA_TX_DBM       14
+#define LORA_PREAMBLE     8
+
+// Packet types (first byte on the wire)
+#define PKT_BEACON   0x01
+#define PKT_LOG      0x02
+#define PKT_MISSION  0x03
+
+// Event types
+#define EVT_NONE     0
+#define EVT_VICTIM   1
+#define EVT_GAS      2
+#define EVT_BLOCKED  3
+
+// Aging constants (receiver-side)
+constexpr float TAU_GAS_S    = 600.0f;
+constexpr float TAU_VICTIM_S = 1800.0f;
+constexpr float STALE_CONF   = 0.3f;
+
+// Mission cap (243 B on air, under the SX1276 255 B FIFO limit)
+#define MISSION_MAX_N 48
+
+// ---------------------------------------------------------------------------
+// Wire formats (all little-endian, packed)
+// ---------------------------------------------------------------------------
+// BEACON  : [type:1][BeaconMsg:14]                     -> 15 B on air
+// LOG     : [type:1][BeaconMsg:14][parentId:1]         -> 16 B on air
+// MISSION : [type:1][targetEvent:1][n:1][entries:5n]   -> 3 + 5n B on air
+// ---------------------------------------------------------------------------
+
+struct __attribute__((packed)) BeaconMsg {
+  uint8_t  version;      // 1
+  uint8_t  beaconId;     // 1
+  uint8_t  eventType;    // 1  EVT_*
+  uint8_t  nextHopId;    // 1  0xFF = none
+  int16_t  x_cm;         // 2
+  int16_t  y_cm;         // 2
+  int16_t  bearingDeg;   // 2  Writer heading at drop time
+  uint32_t ageAtWriteS;  // 4  re-stamped at every TX
+};                       // = 14 B
+
+struct __attribute__((packed)) LogMsg {
+  BeaconMsg b;           // 14
+  uint8_t   parentId;    // 1  beacon it was reached from
+};                       // = 15 B
+
+struct __attribute__((packed)) MissionEntry {
+  uint8_t beaconId;      // 1
+  int16_t x_cm;          // 2
+  int16_t y_cm;          // 2
+};                       // = 5 B
+
+struct __attribute__((packed)) MissionMsg {
+  uint8_t      targetEvent;             // 1
+  uint8_t      n;                       // 1
+  MissionEntry entries[MISSION_MAX_N];  // 5 * n used
+};                                      // = 2 + 5n B payload
+
+static inline size_t missionWireSize(uint8_t n) { return 3u + 5u * n; }
+
+// Compile-time size checks: these must stay in sync with livingmap/beacon.py (BEACON 15 B, LOG 16 B on air).
+static_assert(sizeof(BeaconMsg) == 14, "BeaconMsg must be 14 B");
+static_assert(sizeof(LogMsg) == 15, "LogMsg must be 15 B");
+static_assert(sizeof(MissionEntry) == 5, "MissionEntry must be 5 B");
+
+
+===== FILE: firmware/include/secrets.example.h =====
+
+#pragma once
+
+// Copy this file to secrets.h and fill in your own values.
+// secrets.h is gitignored; never commit real credentials.
+
+#define WIFI_SSID     "YOUR_WIFI_SSID"
+#define WIFI_PASS     "YOUR_WIFI_PASSWORD"
+#define MQTT_HOST     "192.168.1.10"
+#define MQTT_PORT     1883
+#define MQTT_TOPIC    "livingmap/beacons"
+
+// Tunnel entrance anchor (used for local (x,y) -> lat/lon translation)
+#define LAT0_DEG      36.8065
+#define LON0_DEG      10.1815
+// Compass bearing of the local +x axis, degrees clockwise from true north
+#define HEADING_DEG   0.0
+
+===== FILE: firmware/platformio.ini =====
+
+; PlatformIO Project Configuration File
+; Docs: https://docs.platformio.org/page/projectconf.html
+
+[platformio]
+default_envs = beacon1
+
+[common]
+framework = arduino
+platform = espressif32
+board = esp32dev
+lib_deps_base = jgromes/RadioLib@^7.8.1
+build_flags_base =
+    -I include
+    -DCORE_DEBUG_LEVEL=1
+
+[env:beacon1]
+extends = common
+lib_deps = ${common.lib_deps_base}
+build_flags =
+    ${common.build_flags_base}
+    -DBEACON_ID=1
+build_src_filter = +<beacon/>
+
+[env:beacon2]
+extends = common
+lib_deps = ${common.lib_deps_base}
+build_flags =
+    ${common.build_flags_base}
+    -DBEACON_ID=2
+build_src_filter = +<beacon/>
+
+[env:beacon3]
+extends = common
+lib_deps = ${common.lib_deps_base}
+build_flags =
+    ${common.build_flags_base}
+    -DBEACON_ID=3
+build_src_filter = +<beacon/>
+
+[env:gateway]
+extends = common
+lib_deps =
+    ${common.lib_deps_base}
+    knolleary/PubSubClient@^2.8
+build_flags =
+    ${common.build_flags_base}
+build_src_filter = +<gateway/>
+
+[env:writer]
+extends = common
+lib_deps =
+    ${common.lib_deps_base}
+    madhephaestus/ESP32Servo@^3.0.0
+build_flags =
+    ${common.build_flags_base}
+build_src_filter = +<writer/>
+
+[env:receiver]
+extends = common
+lib_deps = ${common.lib_deps_base}
+build_flags =
+    ${common.build_flags_base}
+build_src_filter = +<receiver/>
+
+===== FILE: firmware/src/beacon/main.cpp =====
+
+#include <Arduino.h>
+#include <RadioLib.h>
+#include "beacon_msg.h"
+
+#ifndef BEACON_ID
+#define BEACON_ID 1
+#endif
+
+#define LORA_CS   5
+#define LORA_DIO0 26
+#define LORA_RST  14
+#define LORA_DIO1 33
+
+SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
+
+BeaconMsg fact = {
+  1,           // version
+  BEACON_ID,   // beaconId
+  EVT_NONE,    // eventType
+  0xFF,        // nextHopId
+  0, 0,        // x_cm, y_cm
+  0,           // bearingDeg
+  0            // ageAtWriteS (re-stamped each TX)
+};
+
+uint32_t writtenAtMs = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.printf("Beacon %u booting\n", BEACON_ID);
+
+  int st = radio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
+                       LORA_SYNC_WORD, LORA_TX_DBM, LORA_PREAMBLE);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("radio init failed: %d\n", st);
+    while (true) delay(1000);
+  }
+  radio.setCRC(true);
+
+  writtenAtMs = millis();
+}
+
+void loop() {
+  fact.ageAtWriteS = (millis() - writtenAtMs) / 1000;
+
+  uint8_t frame[1 + sizeof(BeaconMsg)];
+  frame[0] = PKT_BEACON;
+  memcpy(&frame[1], &fact, sizeof(BeaconMsg));
+
+  int st = radio.transmit(frame, sizeof(frame));
+  Serial.printf("TX beacon %u type=BEACON %u B status=%d age=%lus\n",
+                BEACON_ID, (unsigned)sizeof(frame), st,
+                (unsigned long)fact.ageAtWriteS);
+
+  delay(5500 + random(0, 2000));  // 5.5 s + jitter
+}
+
+===== FILE: firmware/src/gateway/main.cpp =====
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <RadioLib.h>
+#include "beacon_msg.h"
+#include "secrets.h"
+
+#define LORA_CS   5
+#define LORA_DIO0 26
+#define LORA_RST  14
+#define LORA_DIO1 33
+
+SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// HEADING_DEG = compass bearing of the local +x axis, clockwise from true north.
+// Same maths as livingmap/frames.py (tested): E = x sin(psi) - y cos(psi), N = x cos(psi) + y sin(psi).
+static void localToLatLon(double x_m, double y_m,
+                          double& lat, double& lon) {
+  double psi = HEADING_DEG * PI / 180.0;
+  double east  = x_m * sin(psi) - y_m * cos(psi);
+  double north = x_m * cos(psi) + y_m * sin(psi);
+  double phi = LAT0_DEG * PI / 180.0;
+  double mLat = 111132.92 - 559.82 * cos(2 * phi) + 1.175 * cos(4 * phi);
+  double mLon = 111412.84 * cos(phi) - 93.5 * cos(3 * phi);
+  lat = LAT0_DEG + north / mLat;
+  lon = LON0_DEG + east  / mLon;
+}
+
+static void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("WiFi");
+  for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) {
+    delay(500); Serial.print(".");
+  }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " ok" : " FAILED");
+}
+
+static void connectMQTT() {
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  while (!mqtt.connected()) {
+    Serial.print("MQTT...");
+    if (mqtt.connect("lora-gateway")) Serial.println("ok");
+    else { Serial.println("retry"); delay(2000); }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  int st = radio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
+                       LORA_SYNC_WORD, LORA_TX_DBM, LORA_PREAMBLE);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("radio init failed: %d\n", st);
+    while (true) delay(1000);
+  }
+  radio.setCRC(true);
+
+  connectWiFi();
+  connectMQTT();
+}
+
+void loop() {
+  if (!mqtt.connected()) connectMQTT();
+  mqtt.loop();
+
+  uint8_t buf[255];
+  int st = radio.receive(buf, sizeof(buf));
+  if (st != RADIOLIB_ERR_NONE) return;
+
+  size_t len = radio.getPacketLength();
+  if (len < 1) return;
+  uint8_t type = buf[0];
+
+  char json[320];
+
+  if (type == PKT_BEACON && len == 1 + sizeof(BeaconMsg)) {
+    BeaconMsg m;
+    memcpy(&m, &buf[1], sizeof(m));
+    double lat, lon;
+    localToLatLon(m.x_cm / 100.0, m.y_cm / 100.0, lat, lon);
+    snprintf(json, sizeof(json),
+      "{\"type\":\"beacon\",\"id\":%u,\"evt\":%u,\"next\":%u,"
+      "\"x_cm\":%d,\"y_cm\":%d,\"brg\":%d,\"age\":%lu,"
+      "\"lat\":%.6f,\"lon\":%.6f,\"rssi\":%.1f,\"snr\":%.1f}",
+      m.beaconId, m.eventType, m.nextHopId, m.x_cm, m.y_cm, m.bearingDeg,
+      (unsigned long)m.ageAtWriteS, lat, lon,
+      radio.getRSSI(), radio.getSNR());
+    mqtt.publish(MQTT_TOPIC, json);
+    Serial.println(json);
+  }
+  else if (type == PKT_LOG && len == 1 + sizeof(LogMsg)) {
+    LogMsg l;
+    memcpy(&l, &buf[1], sizeof(l));
+    double lat, lon;
+    localToLatLon(l.b.x_cm / 100.0, l.b.y_cm / 100.0, lat, lon);
+    snprintf(json, sizeof(json),
+      "{\"type\":\"log\",\"id\":%u,\"evt\":%u,\"parent\":%u,"
+      "\"x_cm\":%d,\"y_cm\":%d,\"age\":%lu,\"lat\":%.6f,\"lon\":%.6f}",
+      l.b.beaconId, l.b.eventType, l.parentId,
+      l.b.x_cm, l.b.y_cm, (unsigned long)l.b.ageAtWriteS, lat, lon);
+    mqtt.publish(MQTT_TOPIC, json);
+    Serial.println(json);
+  }
+  else if (type == PKT_MISSION && len >= 3) {
+    Serial.printf("MISSION received on LoRa (unexpected) len=%u\n",
+                  (unsigned)len);
+  }
+}
+
+===== FILE: firmware/src/receiver/main.cpp =====
+
+#include <Arduino.h>
+#include <RadioLib.h>
+#include <math.h>
+#include "beacon_msg.h"
+
+#define LORA_CS   5
+#define LORA_DIO0 26
+#define LORA_RST  14
+#define LORA_DIO1 33
+
+SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
+
+static float confidence(uint8_t eventType, uint32_t ageS) {
+  if (eventType == EVT_NONE) return 1.0f;
+  float tau = (eventType == EVT_GAS) ? TAU_GAS_S : TAU_VICTIM_S;
+  return expf(-(float)ageS / tau);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  int st = radio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
+                       LORA_SYNC_WORD, LORA_TX_DBM, LORA_PREAMBLE);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("radio init failed: %d\n", st);
+    while (true) delay(1000);
+  }
+  radio.setCRC(true);
+}
+
+void loop() {
+  uint8_t buf[255];
+  int st = radio.receive(buf, sizeof(buf));
+  if (st != RADIOLIB_ERR_NONE) return;
+
+  size_t len = radio.getPacketLength();
+  if (len < 1) return;
+
+  uint8_t type = buf[0];
+
+  if (type == PKT_BEACON && len == 1 + sizeof(BeaconMsg)) {
+    BeaconMsg m;
+    memcpy(&m, &buf[1], sizeof(m));
+    Serial.print("raw:");
+    for (size_t i = 0; i < len; i++) Serial.printf(" %02X", buf[i]);
+    Serial.println();
+    float c = confidence(m.eventType, m.ageAtWriteS);
+    Serial.printf("BEACON id=%u evt=%u next=%u (%d,%d)cm brg=%d age=%lus conf=%.2f RSSI=%.1f SNR=%.1f%s\n",
+                  m.beaconId, m.eventType, m.nextHopId,
+                  m.x_cm, m.y_cm, m.bearingDeg,
+                  (unsigned long)m.ageAtWriteS, c,
+                  radio.getRSSI(), radio.getSNR(),
+                  (c < STALE_CONF ? "  [STALE]" : ""));
+  }
+  else if (type == PKT_LOG && len == 1 + sizeof(LogMsg)) {
+    LogMsg l;
+    memcpy(&l, &buf[1], sizeof(l));
+    Serial.printf("LOG id=%u evt=%u parent=%u (%d,%d)cm age=%lus RSSI=%.1f\n",
+                  l.b.beaconId, l.b.eventType, l.parentId,
+                  l.b.x_cm, l.b.y_cm,
+                  (unsigned long)l.b.ageAtWriteS, radio.getRSSI());
+  }
+  else if (type == PKT_MISSION && len >= 3) {
+    MissionMsg mm;
+    uint8_t n = buf[2];
+    if (n > MISSION_MAX_N) n = MISSION_MAX_N;
+    if (len != 3u + 5u * n) { Serial.println("MISSION bad length"); return; }
+    mm.targetEvent = buf[1];
+    mm.n = n;
+    memcpy(mm.entries, &buf[3], 5u * n);
+    Serial.printf("MISSION target=%u n=%u\n", mm.targetEvent, mm.n);
+    for (uint8_t i = 0; i < mm.n; i++) {
+      Serial.printf("  wp[%u] id=%u (%d,%d)cm\n", i,
+                    mm.entries[i].beaconId,
+                    mm.entries[i].x_cm, mm.entries[i].y_cm);
+    }
+  }
+  else {
+    Serial.printf("unknown frame type=%u len=%u\n", type, (unsigned)len);
+  }
+}
+
+===== FILE: firmware/src/writer/main.cpp =====
+
+#include <Arduino.h>
+#include <RadioLib.h>
+#include <ESP32Servo.h>
+#include "beacon_msg.h"
+
+#define LORA_CS   5
+#define LORA_DIO0 26
+#define LORA_RST  14
+#define LORA_DIO1 33
+#define SERVO_PIN 18
+
+SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
+Servo dropServo;
+
+static int16_t x_cm = 0;
+static int16_t y_cm = 0;
+static int16_t headingDeg = 0;
+static uint8_t nextBeaconId = 1;
+static uint8_t prevBeaconId = 0xFF;
+
+static void dropBeacon(uint8_t eventType) {
+  dropServo.write(90);
+  delay(500);
+  dropServo.write(0);
+
+  BeaconMsg m = {
+    1,
+    nextBeaconId,
+    eventType,
+    prevBeaconId,
+    x_cm, y_cm, headingDeg,
+    0
+  };
+
+  uint8_t frame[1 + sizeof(BeaconMsg)];
+  frame[0] = PKT_BEACON;
+  memcpy(&frame[1], &m, sizeof(BeaconMsg));
+
+  int st = radio.transmit(frame, sizeof(frame));
+  Serial.printf("Dropped beacon %u evt=%u parent=%u status=%d\n",
+                nextBeaconId, eventType, prevBeaconId, st);
+
+  LogMsg lm;
+  lm.b = m;
+  lm.parentId = prevBeaconId;
+  uint8_t logFrame[1 + sizeof(LogMsg)];
+  logFrame[0] = PKT_LOG;
+  memcpy(&logFrame[1], &lm, sizeof(LogMsg));
+  radio.transmit(logFrame, sizeof(logFrame));
+
+  prevBeaconId = nextBeaconId;
+  nextBeaconId++;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  dropServo.attach(SERVO_PIN);
+  dropServo.write(0);
+
+  int st = radio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
+                       LORA_SYNC_WORD, LORA_TX_DBM, LORA_PREAMBLE);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("radio init failed: %d\n", st);
+    while (true) delay(1000);
+  }
+  radio.setCRC(true);
+
+  Serial.println("Writer ready. Press 'd' waypoint, 'v' victim, 'g' gas, 'b' blocked.");
+}
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'd') dropBeacon(EVT_NONE);
+    else if (c == 'v') dropBeacon(EVT_VICTIM);
+    else if (c == 'g') dropBeacon(EVT_GAS);
+    else if (c == 'b') dropBeacon(EVT_BLOCKED);
+  }
+}
+
+===== FILE: livingmap/__init__.py =====
+
+"""The Living Map: simulation of Writer/Executor robots, beacons and the Outside Network Area."""
+
+
+===== FILE: livingmap/beacon.py =====
+
+"""Beacon packets, byte-for-byte compatible with firmware/include/beacon_msg.h.
+
+Wire frame = [type:1][BeaconMsg:14], little-endian, packed (15 B on air):
+
+  off size field        notes
+  --- ---- -----------  ------------------------------------------------
+   0   1   type         PKT_BEACON = 1 (LOG = 2, MISSION = 3)
+   1   1   version      1
+   2   1   beaconId     1..254
+   3   1   eventType    0 none/waypoint, 1 victim, 2 gas, 3 blocked
+   4   1   nextHopId    next beacon in drop order, 0xFF = none
+   5   2   x_cm         int16, private frame, cm
+   7   2   y_cm         int16
+   9   2   bearingDeg   int16, 0..359, Writer heading when the beacon was dropped
+  11   4   ageAtWriteS  uint32, seconds since the event was recorded
+
+LOG     = [type=2][BeaconMsg:14][parentId:1]                 (16 B)
+MISSION = [type=3][targetEvent:1][n:1][n x (beaconId u8, x_cm i16, y_cm i16)]   (3 + 5n B, n <= 48)
+
+There is no application CRC: radio.setCRC(true) on every node, bad frames are dropped by the SX1276.
+"""
+from __future__ import annotations
+
+import math
+import struct
+from dataclasses import dataclass
+from enum import IntEnum
+
+PKT_BEACON, PKT_LOG, PKT_MISSION = 1, 2, 3
+VERSION = 1
+PACKET_SIZE = 15      # [type][BeaconMsg:14]
+LOG_SIZE = 16         # [type][BeaconMsg:14][parentId]
+NONE_ID = 0xFF
+MAX_ROUTE = 48        # 3 + 5*48 = 243 B, under the SX1276 255 B FIFO
+_FMT = "<BBBBBhhhI"
+assert struct.calcsize(_FMT) == PACKET_SIZE
+
+
+class EventType(IntEnum):
+    NONE = 0      # waypoint, no event
+    VICTIM = 1
+    GAS = 2
+    BLOCKED = 3   # reserved (not used by the simulation)
+
+
+# One rule for the whole project: confidence = exp(-age / tau). Waypoints do not decay.
+TAU_S = {EventType.GAS: 600.0, EventType.VICTIM: 1800.0, EventType.BLOCKED: 1800.0}
+STALE_THRESHOLD = 0.3   # below this: verify before trusting
+
+
+def confidence(event_type: int, age_s: float) -> float:
+    tau = TAU_S.get(EventType(event_type))
+    return 1.0 if tau is None else math.exp(-max(0.0, age_s) / tau)
+
+
+class PacketError(ValueError):
+    pass
+
+
+@dataclass
+class Beacon:
+    beacon_id: int
+    event_type: EventType
+    x: float                      # metres, private frame
+    y: float
+    next_hop: int = NONE_ID
+    bearing_deg: int = 0          # Writer heading at drop time
+    age_s: int = 0                # seconds since written
+
+    def _pack(self, pkt_type: int) -> bytes:
+        if not 1 <= self.beacon_id <= 254:
+            raise PacketError("beacon_id must be 1..254")
+        if not 0 <= self.next_hop <= 255:
+            raise PacketError("next_hop must be 0..255")
+        if not 0 <= int(self.event_type) <= 3:
+            raise PacketError("event_type must be 0..3")
+        if not 0 <= self.bearing_deg <= 359:
+            raise PacketError("bearing_deg must be 0..359")
+        if not 0 <= self.age_s <= 0xFFFFFFFF:
+            raise PacketError("age_s out of range")
+        x_cm, y_cm = round(self.x * 100), round(self.y * 100)
+        if not (-32768 <= x_cm <= 32767 and -32768 <= y_cm <= 32767):
+            raise PacketError("position out of range (+-327 m from entrance)")
+        return struct.pack(_FMT, pkt_type, VERSION, self.beacon_id, int(self.event_type),
+                           self.next_hop, x_cm, y_cm, self.bearing_deg, int(self.age_s))
+
+    def pack(self) -> bytes:
+        return self._pack(PKT_BEACON)
+
+    @classmethod
+    def _unpack(cls, data: bytes, want_type: int) -> "Beacon":
+        if len(data) != PACKET_SIZE:
+            raise PacketError(f"expected {PACKET_SIZE} bytes, got {len(data)}")
+        t, ver, bid, et, nxt, x_cm, y_cm, brg, age = struct.unpack(_FMT, data)
+        if t != want_type:
+            raise PacketError(f"unexpected packet type {t}")
+        if ver != VERSION:
+            raise PacketError(f"unsupported version {ver}")
+        if not 1 <= bid <= 254:
+            raise PacketError("bad beacon id")
+        try:
+            ev = EventType(et)
+        except ValueError as e:
+            raise PacketError(f"unknown event type {et}") from e
+        return cls(bid, ev, x_cm / 100, y_cm / 100, nxt, brg, age)
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "Beacon":
+        return cls._unpack(data, PKT_BEACON)
+
+    def aged_confidence(self) -> float:
+        return confidence(self.event_type, self.age_s)
+
+    def is_stale(self) -> bool:
+        return self.aged_confidence() < STALE_THRESHOLD
+
+
+# ---- LOG: Writer -> gateway -------------------------------------------------
+def pack_log(b: Beacon, parent_id: int) -> bytes:
+    return b._pack(PKT_LOG) + bytes([parent_id])
+
+
+def unpack_log(data: bytes) -> tuple[Beacon, int]:
+    if len(data) != LOG_SIZE:
+        raise PacketError(f"expected {LOG_SIZE} bytes, got {len(data)}")
+    return Beacon._unpack(data[:PACKET_SIZE], PKT_LOG), data[PACKET_SIZE]
+
+
+# ---- MISSION: gateway -> Executor (variable length) ----------------------------
+def pack_mission(target_event: int, route: list[tuple[int, float, float]]) -> bytes:
+    if not 1 <= len(route) <= MAX_ROUTE:
+        raise PacketError(f"route must have 1..{MAX_ROUTE} entries")
+    out = struct.pack("<BBB", PKT_MISSION, int(target_event), len(route))
+    for bid, x, y in route:
+        out += struct.pack("<Bhh", bid, round(x * 100), round(y * 100))
+    return out
+
+
+def unpack_mission(data: bytes) -> tuple[int, list[tuple[int, float, float]]]:
+    if len(data) < 3 or data[0] != PKT_MISSION:
+        raise PacketError("not a mission packet")
+    _, target, n = struct.unpack("<BBB", data[:3])
+    if len(data) != 3 + 5 * n:
+        raise PacketError("mission length mismatch")
+    route = [(bid, x / 100, y / 100)
+             for bid, x, y in (struct.unpack("<Bhh", data[3 + 5 * i:8 + 5 * i]) for i in range(n))]
+    return target, route
+
+
+===== FILE: livingmap/command_post.py =====
+
+"""Command post: live map and mission planner."""
+
+
+===== FILE: livingmap/executor.py =====
+
+"""Executor robot: mission briefing, beacon-guided navigation, hazard avoidance."""
+
+
+===== FILE: livingmap/frames.py =====
+
+"""Frame translation: private robot coordinates <-> real-world GPS.
+
+Local frame (Writer's private frame):
+  - origin = the tunnel entrance (the one point with a known GPS fix)
+  - +x     = the direction the Writer faced when it started
+  - +y     = 90 degrees to the left of +x (counter-clockwise, right-handed)
+  - units  = meters
+
+The entrance anchor is (lat0, lon0, heading_deg), where heading_deg is the compass
+bearing of +x, in degrees clockwise from true north.
+
+  East  =  x*sin(psi) - y*cos(psi)
+  North =  x*cos(psi) + y*sin(psi)
+
+North/East offsets are converted to degrees with WGS-84 meters-per-degree
+formulas evaluated at the anchor latitude (error is negligible over a few hundred m).
+"""
+from __future__ import annotations
+
+import math
+
+
+def meters_per_degree(lat_deg: float) -> tuple[float, float]:
+    """Return (meters per degree of latitude, meters per degree of longitude) at lat_deg."""
+    phi = math.radians(lat_deg)
+    m_lat = 111132.92 - 559.82 * math.cos(2 * phi) + 1.175 * math.cos(4 * phi)
+    m_lon = 111412.84 * math.cos(phi) - 93.5 * math.cos(3 * phi)
+    return m_lat, m_lon
+
+
+def local_to_enu(x: float, y: float, heading_deg: float) -> tuple[float, float]:
+    """Rotate local (x, y) into (east, north) meters."""
+    psi = math.radians(heading_deg)
+    east = x * math.sin(psi) - y * math.cos(psi)
+    north = x * math.cos(psi) + y * math.sin(psi)
+    return east, north
+
+
+def enu_to_local(east: float, north: float, heading_deg: float) -> tuple[float, float]:
+    """Inverse rotation: (east, north) meters -> local (x, y)."""
+    psi = math.radians(heading_deg)
+    x = east * math.sin(psi) + north * math.cos(psi)
+    y = -east * math.cos(psi) + north * math.sin(psi)
+    return x, y
+
+
+def local_to_gps(x: float, y: float, lat0: float, lon0: float, heading_deg: float) -> tuple[float, float]:
+    """Local meters -> (lat, lon) in degrees."""
+    east, north = local_to_enu(x, y, heading_deg)
+    m_lat, m_lon = meters_per_degree(lat0)
+    return lat0 + north / m_lat, lon0 + east / m_lon
+
+
+def gps_to_local(lat: float, lon: float, lat0: float, lon0: float, heading_deg: float) -> tuple[float, float]:
+    """(lat, lon) -> local meters. Inverse of local_to_gps."""
+    m_lat, m_lon = meters_per_degree(lat0)
+    return enu_to_local((lon - lon0) * m_lon, (lat - lat0) * m_lat, heading_deg)
+
+
+===== FILE: livingmap/gateway.py =====
+
+"""Outside Network Area gateway: receive, translate to GPS, forward, brief the Executor."""
+
+
+===== FILE: livingmap/run_demo.py =====
+
+"""Entry point for the end-to-end simulation demo.
+
+Run: python -m livingmap.run_demo
+"""
+
+
+def main() -> None:
+    print("Living Map simulation: not implemented yet.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== FILE: livingmap/sim.py =====
+
+"""End-to-end simulation: Writer -> beacons -> gateway (ONA) -> command post -> Executor.
+
+Uses the repo packet code (livingmap/beacon.py) and frame code (livingmap/frames.py).
+"""
+import math
+import random
+from dataclasses import replace
+
+from livingmap.beacon import (Beacon, EventType, NONE_ID, STALE_THRESHOLD,
+                              pack_log, unpack_log, pack_mission, unpack_mission)
+from livingmap.frames import local_to_gps as _l2g
+
+# Beacon format = firmware/common/beacon_msg.h (14 B little-endian, age counter, no clock sync).
+WAYPOINT, GAS, VICTIM = EventType.NONE, EventType.GAS, EventType.VICTIM
+NAMES = {WAYPOINT: "waypoint", GAS: "GAS", VICTIM: "VICTIM"}
+NONE = NONE_ID
+RADIO_LOSS = 0.10     # frames lost to the SX1276 hardware CRC (radio drops them)
+LAT0, LON0, HEADING = 36.8065, 10.1815, 40.0   # demo anchor: entrance GPS + bearing of +x
+
+
+def local_to_gps(x, y):
+    return _l2g(x, y, LAT0, LON0, HEADING)
+
+
+# ---------------- tunnel world (metres, entrance = origin) ----------------
+NODES = {"E": (0, 0), "J1": (20, 0), "J2": (40, 0), "END": (60, 0),
+         "A": (20, 15), "P": (30, 10), "V": (40, -12)}
+EDGES = [("E", "J1"), ("J1", "A"), ("J1", "J2"), ("J1", "P"), ("P", "J2"), ("J2", "V"), ("J2", "END")]
+ADJ = {n: [] for n in NODES}
+for a, b in EDGES:
+    ADJ[a].append(b)
+    ADJ[b].append(a)
+GAS_C, GAS_R, GAS_SENSE = (30.0, 0.0), 3.0, 5.0     # gas plume sits on the direct J1-J2 corridor
+VICTIM_POS, VICTIM_SENSE = (40.0, -12.5), 3.0
+STEP, SPEED = 0.5, 0.5          # metres per step, m/s  -> 1 step = 1 s
+BEACON_EVERY, RADIO = 10.0, 6.0  # drop a waypoint every N m, beacon radio range
+
+
+def dist(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+# ---------------- messaging: nothing talks to the command post except via the gateway ----------------
+ALLOWED = {("gateway", "writer"), ("writer", "gateway"), ("gateway", "executor"),
+           ("executor", "gateway"), ("gateway", "command_post"), ("command_post", "gateway")}
+
+
+class Bus:
+    def __init__(self, sim):
+        self.sim, self.h, self.log = sim, {}, []
+
+    def send(self, src, dst, kind, payload):
+        if (src, dst) not in ALLOWED:
+            raise PermissionError(f"direct link {src}->{dst} is forbidden (must go via gateway/ONA)")
+        self.log.append((src, dst, kind))
+        self.sim.say(f"{src:>12} -> {dst:<12} [{kind}]")
+        self.h[dst](src, kind, payload)
+
+
+class Sim:
+    def __init__(self, verbose=True):
+        self.t, self.verbose = 0.0, verbose
+        self.beacons, self.frames, self.phase = [], [], "init"
+        self.cp_state, self.exec_active = 0, False
+        self.writer = self.executor = None
+        self.cp_points, self.cp_route = [], []
+
+    def say(self, msg):
+        if self.verbose:
+            print(f"[t={self.t:7.0f}s] {msg}")
+
+    def snap(self):
+        if self.writer is None:
+            return
+        e = tuple(self.executor.true) if self.exec_active else None
+        self.frames.append((self.t, self.phase, tuple(self.writer.true), tuple(self.writer.est),
+                            e, len(self.beacons), self.cp_state))
+
+
+# ---------------- robots ----------------
+class Robot:
+    def __init__(self, sim, rng):
+        self.sim, self.rng = sim, rng
+        self.true, self.est, self.bias, self.heading = [0.0, 0.0], [0.0, 0.0], 0.0, 0
+
+    def move(self, dx, dy):
+        """True displacement; the robot's own position estimate drifts (dead reckoning)."""
+        self.true[0] += dx
+        self.true[1] += dy
+        self.bias += self.rng.gauss(0, 0.002)
+        k = 1 + self.rng.gauss(0, 0.01)
+        c, s = math.cos(self.bias + 0.01), math.sin(self.bias + 0.01)
+        ex, ey = k * (c * dx - s * dy), k * (s * dx + c * dy)
+        self.est[0] += ex
+        self.est[1] += ey
+        self.heading = round(math.degrees(math.atan2(ey, ex))) % 360
+        self.sim.t += STEP / SPEED
+        self.sim.snap()
+
+    def walk(self, target, on_step=None):
+        while True:
+            dx, dy = target[0] - self.true[0], target[1] - self.true[1]
+            d = math.hypot(dx, dy)
+            if d < 1e-6:
+                return False
+            k = min(STEP, d) / d
+            self.move(dx * k, dy * k)
+            if on_step and on_step(self):
+                return True
+            if d <= STEP:
+                self.true = [float(target[0]), float(target[1])]
+                return False
+
+
+class Writer(Robot):
+    def __init__(self, sim, rng, bus):
+        super().__init__(sim, rng)
+        self.bus = bus
+        self.next_id, self.prev, self.since = 1, NONE, 0.0
+        self.node_beacon, self.visited, self.log = {}, set(), []
+
+    def on_msg(self, src, kind, p):
+        pass
+
+    def drop(self, etype):
+        bc = Beacon(self.next_id, etype, self.est[0], self.est[1],
+                    next_hop=self.next_id + 1, bearing_deg=self.heading)
+        self.sim.beacons.append({"id": bc.beacon_id, "true": tuple(self.true), "etype": etype,
+                                 "beacon": bc, "t_drop": self.sim.t})
+        self.log.append((bc, self.prev, self.sim.t))
+        self.sim.say(f"Writer drops beacon #{bc.beacon_id:<2} {NAMES[etype]:<8} at est=({self.est[0]:5.1f},{self.est[1]:5.1f}) "
+                     f"true=({self.true[0]:5.1f},{self.true[1]:5.1f}) heading={bc.bearing_deg}")
+        self.prev, self.since, self.next_id = bc.beacon_id, 0.0, bc.beacon_id + 1
+        return bc.beacon_id
+
+    def run(self):
+        self.sim.phase = "Writer exploring"
+        self.drop(WAYPOINT)
+        self.node_beacon["E"] = self.prev
+        self.dfs("E")
+        err = dist(self.est, self.true)
+        self.sim.say(f"Writer back at entrance, dead-reckoning error = {err:.2f} m")
+        self.sim.phase = "Writer uploading log"
+        recs = [pack_log(replace(bc, age_s=int(self.sim.t - t)), parent).hex() for bc, parent, t in self.log]
+        self.bus.send("writer", "gateway", "log_upload", recs)
+        return err
+
+    def dfs(self, node):
+        for nb in ADJ[node]:
+            e = frozenset((node, nb))
+            if e in self.visited:
+                continue
+            self.visited.add(e)
+            self.prev, self.since = self.node_beacon[node], 0.0
+            if self.walk_edge(node, nb):
+                continue                                    # gas: turned back
+            if nb in self.node_beacon:                      # loop closure
+                self.walk(NODES[node])
+                continue
+            et = VICTIM if dist(NODES[nb], VICTIM_POS) <= VICTIM_SENSE else WAYPOINT
+            self.node_beacon[nb] = self.drop(et)
+            self.dfs(nb)
+            self.walk(NODES[node])                          # backtrack, no beacons
+
+    def walk_edge(self, a, b):
+        tgt = NODES[b]
+
+        def on_step(r):
+            if dist(r.true, GAS_C) <= GAS_SENSE:
+                return True
+            self.since += STEP
+            if self.since >= BEACON_EVERY and dist(r.true, tgt) >= 4:
+                self.drop(WAYPOINT)
+            return False
+
+        if self.walk(tgt, on_step):
+            self.drop(GAS)                # value = gas level
+            self.walk(NODES[a])                             # retreat, never enter the plume
+            return True
+        return False
+
+
+class Gateway:
+    """Outside Network Area: LoRa side <-> Wi-Fi/MQTT side. Does frame translation."""
+
+    def __init__(self, bus, sim):
+        self.bus, self.sim = bus, sim
+
+    def on_msg(self, src, kind, p):
+        if kind == "log_upload":
+            pts = []
+            for h in p:
+                try:
+                    k, parent = unpack_log(bytes.fromhex(h))
+                except ValueError:
+                    self.sim.say("gateway: dropped malformed record")
+                    continue
+                lat, lon = local_to_gps(k.x, k.y)
+                pts.append({"id": k.beacon_id, "etype": k.event_type, "prev": parent, "x": k.x, "y": k.y,
+                            "lat": lat, "lon": lon, "conf": k.aged_confidence(), "age_s": k.age_s})
+            self.bus.send("gateway", "command_post", "map_update", pts)
+        elif kind == "mission":
+            self.bus.send("gateway", "executor", "briefing", p)   # p = MISSION bytes, forwarded as-is
+
+
+class CommandPost:
+    def __init__(self, bus, sim):
+        self.bus, self.sim = bus, sim
+
+    def on_msg(self, src, kind, p):
+        if kind != "map_update":
+            return
+        self.sim.cp_points, self.sim.cp_state = p, 1
+        by = {b["id"]: b for b in p}
+        victims = [b for b in p if b["etype"] == VICTIM]
+        if not victims:
+            return
+        path, cur = [], victims[0]["id"]
+        while cur in by:                                    # follow parent edges back to the entrance
+            path.append(by[cur])
+            cur = by[cur]["prev"]
+        path.reverse()
+        self.sim.cp_route, self.sim.cp_state = path, 2
+        gas = [b["id"] for b in p if b["etype"] == GAS]
+        self.sim.say(f"command post: route {[b['id'] for b in path]} to victim, hazard beacons {gas} excluded")
+        mission = pack_mission(VICTIM, [(b["id"], b["x"], b["y"]) for b in path])
+        self.sim.say(f"command post: mission packet = {len(mission)} bytes")
+        self.bus.send("command_post", "gateway", "mission", mission)
+
+
+class Executor(Robot):
+    def __init__(self, sim, rng, bus):
+        super().__init__(sim, rng)
+        self.bus, self.mission, self.heard, self.crc_fail = bus, None, {}, 0
+        self.exposure, self.idx, self.corrections = 0, 1, []
+
+    def on_msg(self, src, kind, p):
+        if kind == "briefing":
+            target, route = unpack_mission(p)
+            self.mission = {"target": target, "route": [{"id": i, "x": x, "y": y} for i, x, y in route]}
+            self.sim.say(f"Executor briefed at entrance: {len(route)} beacons ({len(p)} B mission packet)")
+
+    def listen(self):
+        for b in self.sim.beacons:
+            if b["id"] in self.heard or dist(self.true, b["true"]) > RADIO:
+                continue
+            if self.rng.random() < RADIO_LOSS:                  # hardware CRC failed: radio drops the frame
+                self.crc_fail += 1
+                continue
+            age = int(self.sim.t - b["t_drop"])                 # the beacon's own age counter
+            p = Beacon.unpack(replace(b["beacon"], age_s=age).pack())
+            c = p.aged_confidence()
+            self.heard[p.beacon_id] = c
+            tag = "STALE-verify" if c < STALE_THRESHOLD else "fresh"
+            self.sim.say(f"Executor hears #{p.beacon_id} {NAMES[p.event_type]} age={p.age_s}s conf={c:.2f} ({tag})"
+                         + ("  HAZARD, not on route" if p.event_type == GAS else ""))
+
+    def run(self):
+        self.sim.phase = "Executor navigating"
+        self.sim.exec_active = True
+        route, self.est, self.node, self.came = self.mission["route"], [0.0, 0.0], "E", ""
+        beacon = {b["id"]: b for b in self.sim.beacons}
+
+        def on_step(r):
+            self.listen()
+            if dist(r.true, GAS_C) < GAS_R:
+                self.exposure += 1
+            wp = route[self.idx]
+            if dist(r.true, beacon[wp["id"]]["true"]) <= 1.0:   # strong RSSI = passing the beacon
+                self.corrections.append(dist(self.est, (wp["x"], wp["y"])))
+                self.est = [wp["x"], wp["y"]]                    # re-anchor to beacon coordinates
+                self.sim.say(f"Executor passes #{wp['id']}, re-anchors (drift fixed: {self.corrections[-1]:.2f} m)")
+                self.idx += 1
+                return self.idx >= len(route)
+            return False
+
+        while self.idx < len(route):
+            t = route[self.idx]
+            vx, vy = t["x"] - self.est[0], t["y"] - self.est[1]
+            cand = [n for n in ADJ[self.node] if n != self.came] or ADJ[self.node]
+
+            def score(n):
+                ex, ey = NODES[n][0] - NODES[self.node][0], NODES[n][1] - NODES[self.node][1]
+                return (ex * vx + ey * vy) / (math.hypot(ex, ey) * math.hypot(vx, vy) + 1e-9)
+
+            nb = max(cand, key=score)
+            if self.walk(NODES[nb], on_step):
+                break
+            self.came, self.node = self.node, nb
+        self.sim.phase = "Mission complete: victim reached"
+        self.sim.say("Executor reached the victim beacon. MISSION COMPLETE.")
+
+
+def run_simulation(seed=7, verbose=True, exec_delay_s=900):
+    rng = random.Random(seed)
+    sim = Sim(verbose)
+    bus = Bus(sim)
+    gw, cp = Gateway(bus, sim), CommandPost(bus, sim)
+    wr, ex = Writer(sim, rng, bus), Executor(sim, rng, bus)
+    sim.writer, sim.executor = wr, ex
+    bus.h = {"gateway": gw.on_msg, "command_post": cp.on_msg, "writer": wr.on_msg, "executor": ex.on_msg}
+    sim.writer_error = wr.run()
+    sim.t += exec_delay_s                                   # Executor is deployed later (beacon age counters keep running)
+    sim.say(f"--- Executor deployed {exec_delay_s // 60} min after the Writer finished ---")
+    ex.run()
+    sim.executor_exposure, sim.bus = ex.exposure, bus
+    sim.victim_reached = ex.idx >= len(ex.mission["route"])
+    return sim
+
+
+# ---------------- visualisation ----------------
+def animate(sim, every=3, save=None, show=True):
+    import matplotlib
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+    import numpy as np
+
+    fig, (ax, cx) = plt.subplots(1, 2, figsize=(13, 6))
+    for a, b in EDGES:
+        ax.plot(*zip(NODES[a], NODES[b]), color="#888", lw=8, solid_capstyle="round", alpha=.4)
+    ax.add_patch(plt.Circle(GAS_C, GAS_R, color="orange", alpha=.35))
+    ax.plot(*VICTIM_POS, "r*", ms=16)
+    ax.set_title("Mine (ground truth)"); ax.set_aspect("equal"); ax.set_xlim(-5, 65); ax.set_ylim(-18, 20)
+    col = {WAYPOINT: "#555", GAS: "orange", VICTIM: "red"}
+    bsc = ax.scatter([], [], s=45, zorder=3)
+    wdot, = ax.plot([], [], "bo", ms=10, label="Writer"); edot, = ax.plot([], [], "gs", ms=10, label="Executor")
+    ax.legend(loc="upper right")
+    txt = ax.text(-4, 17.5, "", fontsize=10, va="top")
+    cx.set_title("Command post: live map (GPS)"); cx.tick_params(labelsize=7)
+    allp = [local_to_gps(*NODES[n]) for n in NODES]
+    cx.set_xlim(min(p[1] for p in allp) - 3e-4, max(p[1] for p in allp) + 3e-4)
+    cx.set_ylim(min(p[0] for p in allp) - 2e-4, max(p[0] for p in allp) + 2e-4)
+    csc = cx.scatter([], [], s=45); rline, = cx.plot([], [], "g-", lw=2, label="mission route")
+    cx.text(.5, .5, "", transform=cx.transAxes)
+    fr = sim.frames[::every] + [sim.frames[-1]]
+
+    def upd(i):
+        t, ph, wt, we, et, nb, cps = fr[i]
+        bs = sim.beacons[:nb]
+        bsc.set_offsets(np.array([b["true"] for b in bs]).reshape(-1, 2))
+        bsc.set_color([col[b["etype"]] for b in bs])
+        wdot.set_data([wt[0]], [wt[1]])
+        edot.set_data([et[0]] if et else [], [et[1]] if et else [])
+        txt.set_text(f"t = {t:5.0f} s\n{ph}")
+        pts = sim.cp_points if cps >= 1 else []
+        csc.set_offsets(np.array([[p["lon"], p["lat"]] for p in pts]).reshape(-1, 2))
+        csc.set_color([col[p["etype"]] for p in pts])
+        r = sim.cp_route if cps >= 2 else []
+        rline.set_data([p["lon"] for p in r], [p["lat"] for p in r])
+        return bsc, wdot, edot, txt, csc, rline
+
+    ani = FuncAnimation(fig, upd, frames=len(fr), interval=40, blit=False)
+    if save:
+        ani.save(save, writer="pillow", fps=15, dpi=60)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+===== FILE: livingmap/world.py =====
+
+"""Tunnel world: grid/graph with walls, junctions, hazards and a victim."""
+
+
+===== FILE: livingmap/writer.py =====
+
+"""Writer robot: dead reckoning, frontier exploration, event detection, beacon drop."""
+
+
+===== FILE: requirements.txt =====
+
+numpy
+matplotlib
+pytest
+
+
+===== FILE: run_demo.py =====
+
+"""Run the Living Map simulation.  py run_demo.py [--seed N] [--gif demo/demo.gif] [--no-show]"""
+import argparse
+from livingmap.sim import run_simulation, animate
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--seed", type=int, default=7)
+ap.add_argument("--gif", default=None, help="save animation to this .gif")
+ap.add_argument("--no-show", action="store_true", help="do not open a window")
+a = ap.parse_args()
+
+sim = run_simulation(seed=a.seed)
+print("\n=== SUMMARY ===")
+print(f"Writer drift at return : {sim.writer_error:.2f} m")
+print(f"Beacons dropped        : {len(sim.beacons)}")
+print(f"Victim reached         : {sim.victim_reached}")
+print(f"Executor gas exposure  : {sim.executor_exposure} steps (0 = avoided)")
+animate(sim, every=6, save=a.gif, show=not a.no_show)
+
+
+===== FILE: tests/test_beacon.py =====
+
+import math
+import pytest
+
+from livingmap.beacon import (LOG_SIZE, MAX_ROUTE, NONE_ID, PACKET_SIZE, PKT_BEACON, PKT_LOG, PKT_MISSION,
+                              Beacon, EventType, PacketError, confidence, pack_log, pack_mission,
+                              unpack_log, unpack_mission)
+
+
+def sample(**kw):
+    d = dict(beacon_id=7, event_type=EventType.GAS, x=12.34, y=-5.67, next_hop=8,
+             bearing_deg=270, age_s=120)
+    d.update(kw)
+    return Beacon(**d)
+
+
+def test_matches_firmware_golden_frame():
+    # Produced by compiling firmware/include/beacon_msg.h with g++ and building the frame like
+    # firmware/src/beacon: BeaconMsg m = {1, 7, EVT_GAS, 8, 1234, -567, 270, 120}
+    golden = bytes.fromhex("0101070208d204c9fd0e0178000000")
+    assert sample().pack() == golden
+    assert Beacon.unpack(golden) == Beacon(7, EventType.GAS, 12.34, -5.67, 8, 270, 120)
+
+
+def test_sizes_match_firmware():
+    assert len(sample().pack()) == PACKET_SIZE == 15
+    assert len(pack_log(sample(), 5)) == LOG_SIZE == 16
+
+
+def test_firmware_constants():
+    assert (PKT_BEACON, PKT_LOG, PKT_MISSION) == (1, 2, 3)
+    assert (EventType.NONE, EventType.VICTIM, EventType.GAS, EventType.BLOCKED) == (0, 1, 2, 3)
+
+
+def test_little_endian_layout():
+    raw = Beacon(3, EventType.VICTIM, 1.0, -1.0, next_hop=4, bearing_deg=90, age_s=1).pack()
+    assert raw == bytes([1, 1, 3, 1, 4]) + (100).to_bytes(2, "little") \
+        + (-100).to_bytes(2, "little", signed=True) + (90).to_bytes(2, "little") + (1).to_bytes(4, "little")
+
+
+def test_round_trip():
+    r = Beacon.unpack(sample().pack())
+    assert (r.beacon_id, r.event_type, r.next_hop, r.bearing_deg, r.age_s) == (7, EventType.GAS, 8, 270, 120)
+    assert r.x == pytest.approx(12.34, abs=0.005) and r.y == pytest.approx(-5.67, abs=0.005)
+
+
+def test_default_next_hop_is_none():
+    assert Beacon.unpack(Beacon(1, EventType.NONE, 0, 0).pack()).next_hop == NONE_ID
+
+
+def test_bad_packets_rejected():
+    good = sample().pack()
+    bad_frames = (good[:-1],                       # wrong length
+                  b"\x02" + good[1:],              # wrong packet type
+                  good[:1] + b"\x09" + good[2:],   # unsupported version
+                  good[:3] + b"\x09" + good[4:])   # unknown event type
+    for bad in bad_frames:
+        with pytest.raises(PacketError):
+            Beacon.unpack(bad)
+
+
+def test_out_of_range_rejected():
+    for kw in (dict(x=400.0), dict(beacon_id=0), dict(bearing_deg=360), dict(age_s=-1)):
+        with pytest.raises(PacketError):
+            sample(**kw).pack()
+
+
+def test_aging_law_matches_firmware_constants():
+    assert confidence(EventType.GAS, 0) == 1.0
+    assert confidence(EventType.GAS, 600) == pytest.approx(math.exp(-1))
+    assert confidence(EventType.VICTIM, 1800) == pytest.approx(math.exp(-1))
+    assert confidence(EventType.NONE, 10**7) == 1.0          # waypoints do not decay
+
+
+def test_stale_threshold_is_0_3():
+    assert not sample(age_s=600).is_stale()                  # 0.37
+    assert sample(age_s=900).is_stale()                      # 0.22
+    assert not sample(event_type=EventType.VICTIM, age_s=900).is_stale()   # 0.61
+
+
+def test_log_record_carries_parent():
+    b, parent = unpack_log(pack_log(sample(), 5))
+    assert parent == 5 and b.beacon_id == 7
+    with pytest.raises(PacketError):
+        unpack_log(sample().pack() + b"\x00")                # a BEACON frame is not a LOG frame
+
+
+def test_mission_round_trip_and_size():
+    route = [(1, 0.0, 0.0), (3, 20.0, 0.0), (11, 40.0, -12.0)]
+    raw = pack_mission(EventType.VICTIM, route)
+    assert raw[0] == PKT_MISSION and len(raw) == 3 + 5 * 3
+    t, r = unpack_mission(raw)
+    assert t == EventType.VICTIM and r == route
+
+
+def test_mission_cap_is_48_entries():
+    assert len(pack_mission(EventType.VICTIM, [(1, 0, 0)] * MAX_ROUTE)) == 243
+    with pytest.raises(PacketError):
+        pack_mission(EventType.VICTIM, [(1, 0, 0)] * (MAX_ROUTE + 1))
+
+
+===== FILE: tests/test_frames.py =====
+
+import math
+
+import pytest
+
+from livingmap.frames import (gps_to_local, local_to_enu, local_to_gps,
+                              meters_per_degree)
+
+LAT0, LON0 = 36.8065, 10.1815  # Tunis (example anchor)
+
+
+def test_heading_north_x_goes_north():
+    e, n = local_to_enu(10, 0, 0)
+    assert (e, n) == pytest.approx((0, 10), abs=1e-9)
+
+
+def test_heading_north_y_goes_west():
+    e, n = local_to_enu(0, 10, 0)
+    assert (e, n) == pytest.approx((-10, 0), abs=1e-9)
+
+
+def test_heading_east_x_goes_east_y_goes_north():
+    assert local_to_enu(10, 0, 90) == pytest.approx((10, 0), abs=1e-9)
+    assert local_to_enu(0, 10, 90) == pytest.approx((0, 10), abs=1e-9)
+
+
+def test_distance_preserved():
+    e, n = local_to_enu(30, 40, 37)
+    assert math.hypot(e, n) == pytest.approx(50)
+
+
+def test_origin_maps_to_anchor():
+    assert local_to_gps(0, 0, LAT0, LON0, 123) == (LAT0, LON0)
+
+
+def test_100m_north_is_about_0_0009_deg():
+    lat, lon = local_to_gps(100, 0, LAT0, LON0, 0)
+    assert lon == pytest.approx(LON0, abs=1e-12)
+    assert lat - LAT0 == pytest.approx(100 / meters_per_degree(LAT0)[0])
+    assert 0.00089 < lat - LAT0 < 0.00091
+
+
+@pytest.mark.parametrize("heading", [0, 45, 90, 181, 270, 359])
+def test_round_trip(heading):
+    x, y = 123.4, -56.7
+    lat, lon = local_to_gps(x, y, LAT0, LON0, heading)
+    x2, y2 = gps_to_local(lat, lon, LAT0, LON0, heading)
+    assert (x2, y2) == pytest.approx((x, y), abs=1e-6)
+
+
+===== FILE: tests/test_placeholder.py =====
+
+def test_import():
+    import livingmap  # noqa: F401
+
+
+===== FILE: tests/test_sim.py =====
+
+import pytest
+from livingmap.sim import run_simulation, GAS, VICTIM
+
+
+@pytest.mark.parametrize("seed", [1, 7, 42])
+def test_mission_succeeds_and_avoids_gas(seed):
+    sim = run_simulation(seed=seed, verbose=False)
+    assert sim.victim_reached
+    assert sim.executor_exposure == 0
+    assert {b["etype"] for b in sim.beacons} >= {GAS, VICTIM}
+
+
+def test_no_direct_link_to_command_post():
+    sim = run_simulation(seed=3, verbose=False)
+    assert all("gateway" in (s, d) for s, d, _ in sim.bus.log)
+
+
+def test_gas_beacon_is_stale_and_victim_fresh_after_delay():
+    from livingmap.beacon import confidence, STALE_THRESHOLD, EventType
+    sim = run_simulation(seed=7, verbose=False)
+    gas = next(p for p in sim.cp_points if p["etype"] == GAS)
+    victim = next(p for p in sim.cp_points if p["etype"] == VICTIM)
+    # age at the gateway is small; after the 900 s delay gas is already stale, victim is not
+    assert confidence(EventType.GAS, gas["age_s"] + 900) < STALE_THRESHOLD
+    assert confidence(EventType.VICTIM, victim["age_s"] + 900) > STALE_THRESHOLD
+
+
+def test_route_excludes_gas_beacon():
+    sim = run_simulation(seed=7, verbose=False)
+    assert all(p["etype"] != GAS for p in sim.cp_route)
+
