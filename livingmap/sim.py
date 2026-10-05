@@ -1,74 +1,25 @@
-"""End-to-end Phase 1 simulation: Writer -> beacons -> gateway (ONA) -> command post -> Executor.
+"""End-to-end simulation: Writer -> beacons -> gateway (ONA) -> command post -> Executor.
 
-Self-contained on purpose (packet + GPS maths are inlined, mirroring beacon.py / frames.py)
-so the demo runs on its own. Later you can swap pack/unpack/local_to_gps for the repo versions.
+Uses the repo packet code (livingmap/beacon.py) and frame code (livingmap/frames.py).
 """
 import math
 import random
-import struct
-from dataclasses import dataclass
+from dataclasses import replace
 
-# ---------------- beacon packet (16 bytes, see docs/beacon_packet.md) ----------------
-WAYPOINT, GAS, VICTIM, BLOCKED = 0, 1, 2, 3
-F_JUNCTION, F_DEAD, F_HAZ, F_ENTR = 0x1, 0x2, 0x4, 0x8
-NONE = 0xFF
-HALF_LIFE = {WAYPOINT: 86400, GAS: 600, BLOCKED: 1800, VICTIM: 3600}
-STALE = 0.25
-NAMES = {WAYPOINT: "waypoint", GAS: "GAS", VICTIM: "VICTIM", BLOCKED: "blocked"}
+from livingmap.beacon import (Beacon, EventType, NONE_ID, STALE_THRESHOLD,
+                              pack_log, unpack_log, pack_mission, unpack_mission)
+from livingmap.frames import local_to_gps as _l2g
 
-
-def crc16(data):
-    crc = 0xFFFF
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
-
-
-@dataclass
-class Pkt:
-    id: int
-    etype: int
-    flags: int
-    prev: int
-    nxt: int
-    x_cm: int
-    y_cm: int
-    ts: int
-    conf: int
-    value: int
-
-
-def pack(p):
-    body = struct.pack(">BBBBhhIBB", p.id, (p.etype << 4) | p.flags, p.prev, p.nxt,
-                       p.x_cm, p.y_cm, p.ts, p.conf, p.value)
-    return body + struct.pack(">H", crc16(body))
-
-
-def unpack(raw):
-    if len(raw) != 16 or crc16(raw[:14]) != struct.unpack(">H", raw[14:])[0]:
-        raise ValueError("CRC/length error")
-    i, tf, pr, nx, x, y, ts, c, v = struct.unpack(">BBBBhhIBB", raw[:14])
-    return Pkt(i, tf >> 4, tf & 0xF, pr, nx, x, y, ts, c, v)
-
-
-def aged_conf(p, now):
-    return (p.conf / 255.0) * 0.5 ** (max(0, now - p.ts) / HALF_LIFE[p.etype])
-
-
-# ---------------- frame translation (see docs/frame_translation.md) ----------------
+# Beacon format = firmware/common/beacon_msg.h (14 B little-endian, age counter, no clock sync).
+WAYPOINT, GAS, VICTIM = EventType.NONE, EventType.GAS, EventType.VICTIM
+NAMES = {WAYPOINT: "waypoint", GAS: "GAS", VICTIM: "VICTIM"}
+NONE = NONE_ID
+RADIO_LOSS = 0.10     # frames lost to the SX1276 hardware CRC (radio drops them)
 LAT0, LON0, HEADING = 36.8065, 10.1815, 40.0   # demo anchor: entrance GPS + bearing of +x
 
 
-def local_to_gps(x, y, lat0=LAT0, lon0=LON0, heading=HEADING):
-    psi = math.radians(heading)
-    east = x * math.sin(psi) - y * math.cos(psi)
-    north = x * math.cos(psi) + y * math.sin(psi)
-    ph = math.radians(lat0)
-    m_lat = 111132.92 - 559.82 * math.cos(2 * ph) + 1.175 * math.cos(4 * ph)
-    m_lon = 111412.84 * math.cos(ph) - 93.5 * math.cos(3 * ph)
-    return lat0 + north / m_lat, lon0 + east / m_lon
+def local_to_gps(x, y):
+    return _l2g(x, y, LAT0, LON0, HEADING)
 
 
 # ---------------- tunnel world (metres, entrance = origin) ----------------
@@ -108,14 +59,11 @@ class Bus:
 
 class Sim:
     def __init__(self, verbose=True):
-        self.t, self.t0, self.verbose = 0.0, 1_790_000_000, verbose
+        self.t, self.verbose = 0.0, verbose
         self.beacons, self.frames, self.phase = [], [], "init"
         self.cp_state, self.exec_active = 0, False
         self.writer = self.executor = None
         self.cp_points, self.cp_route = [], []
-
-    def now(self):
-        return self.t0 + int(self.t)
 
     def say(self, msg):
         if self.verbose:
@@ -133,7 +81,7 @@ class Sim:
 class Robot:
     def __init__(self, sim, rng):
         self.sim, self.rng = sim, rng
-        self.true, self.est, self.bias = [0.0, 0.0], [0.0, 0.0], 0.0
+        self.true, self.est, self.bias, self.heading = [0.0, 0.0], [0.0, 0.0], 0.0, 0
 
     def move(self, dx, dy):
         """True displacement; the robot's own position estimate drifts (dead reckoning)."""
@@ -142,8 +90,10 @@ class Robot:
         self.bias += self.rng.gauss(0, 0.002)
         k = 1 + self.rng.gauss(0, 0.01)
         c, s = math.cos(self.bias + 0.01), math.sin(self.bias + 0.01)
-        self.est[0] += k * (c * dx - s * dy)
-        self.est[1] += k * (s * dx + c * dy)
+        ex, ey = k * (c * dx - s * dy), k * (s * dx + c * dy)
+        self.est[0] += ex
+        self.est[1] += ey
+        self.heading = round(math.degrees(math.atan2(ey, ex))) % 360
         self.sim.t += STEP / SPEED
         self.sim.snap()
 
@@ -165,34 +115,34 @@ class Robot:
 class Writer(Robot):
     def __init__(self, sim, rng, bus):
         super().__init__(sim, rng)
-        self.bus, self.clock_off = bus, 0
+        self.bus = bus
         self.next_id, self.prev, self.since = 1, NONE, 0.0
-        self.node_beacon, self.visited, self.packets = {}, set(), []
+        self.node_beacon, self.visited, self.log = {}, set(), []
 
     def on_msg(self, src, kind, p):
-        if kind == "time_sync":
-            self.clock_off = p["unix"] - self.sim.t0     # clock synced at the entrance
+        pass
 
-    def drop(self, etype, flags=0, value=0):
-        p = Pkt(self.next_id, etype, flags, self.prev, NONE, round(self.est[0] * 100),
-                round(self.est[1] * 100), self.sim.t0 + self.clock_off + int(self.sim.t), 255, value)
-        raw = pack(p)
-        self.sim.beacons.append({"id": p.id, "true": tuple(self.true), "etype": etype, "pkt": raw})
-        self.packets.append(raw)
-        self.sim.say(f"Writer drops beacon #{p.id:<2} {NAMES[etype]:<8} at est=({self.est[0]:5.1f},{self.est[1]:5.1f}) "
-                     f"true=({self.true[0]:5.1f},{self.true[1]:5.1f})")
-        self.prev, self.since, self.next_id = p.id, 0.0, p.id + 1
-        return p.id
+    def drop(self, etype):
+        bc = Beacon(self.next_id, etype, self.est[0], self.est[1],
+                    next_hop=self.next_id + 1, bearing_deg=self.heading)
+        self.sim.beacons.append({"id": bc.beacon_id, "true": tuple(self.true), "etype": etype,
+                                 "beacon": bc, "t_drop": self.sim.t})
+        self.log.append((bc, self.prev, self.sim.t))
+        self.sim.say(f"Writer drops beacon #{bc.beacon_id:<2} {NAMES[etype]:<8} at est=({self.est[0]:5.1f},{self.est[1]:5.1f}) "
+                     f"true=({self.true[0]:5.1f},{self.true[1]:5.1f}) heading={bc.bearing_deg}")
+        self.prev, self.since, self.next_id = bc.beacon_id, 0.0, bc.beacon_id + 1
+        return bc.beacon_id
 
     def run(self):
         self.sim.phase = "Writer exploring"
-        self.drop(WAYPOINT, F_ENTR)
+        self.drop(WAYPOINT)
         self.node_beacon["E"] = self.prev
         self.dfs("E")
         err = dist(self.est, self.true)
         self.sim.say(f"Writer back at entrance, dead-reckoning error = {err:.2f} m")
         self.sim.phase = "Writer uploading log"
-        self.bus.send("writer", "gateway", "log_upload", [p.hex() for p in self.packets])
+        recs = [pack_log(replace(bc, age_s=int(self.sim.t - t)), parent).hex() for bc, parent, t in self.log]
+        self.bus.send("writer", "gateway", "log_upload", recs)
         return err
 
     def dfs(self, node):
@@ -207,14 +157,8 @@ class Writer(Robot):
             if nb in self.node_beacon:                      # loop closure
                 self.walk(NODES[node])
                 continue
-            deg, flags, et, val = len(ADJ[nb]), 0, WAYPOINT, 0
-            if deg >= 3:
-                flags |= F_JUNCTION
-            if deg == 1:
-                flags |= F_DEAD
-            if dist(NODES[nb], VICTIM_POS) <= VICTIM_SENSE:
-                et, val = VICTIM, 1
-            self.node_beacon[nb] = self.drop(et, flags, val)
+            et = VICTIM if dist(NODES[nb], VICTIM_POS) <= VICTIM_SENSE else WAYPOINT
+            self.node_beacon[nb] = self.drop(et)
             self.dfs(nb)
             self.walk(NODES[node])                          # backtrack, no beacons
 
@@ -230,7 +174,7 @@ class Writer(Robot):
             return False
 
         if self.walk(tgt, on_step):
-            self.drop(GAS, F_HAZ, value=180)                # value = gas level
+            self.drop(GAS)                # value = gas level
             self.walk(NODES[a])                             # retreat, never enter the plume
             return True
         return False
@@ -247,17 +191,16 @@ class Gateway:
             pts = []
             for h in p:
                 try:
-                    k = unpack(bytes.fromhex(h))
+                    k, parent = unpack_log(bytes.fromhex(h))
                 except ValueError:
-                    self.sim.say("gateway: dropped packet (bad CRC)")
+                    self.sim.say("gateway: dropped malformed record")
                     continue
-                x, y = k.x_cm / 100, k.y_cm / 100
-                lat, lon = local_to_gps(x, y)
-                pts.append({"id": k.id, "etype": k.etype, "flags": k.flags, "prev": k.prev, "x": x, "y": y,
-                            "lat": lat, "lon": lon, "conf": aged_conf(k, self.sim.now()), "value": k.value})
+                lat, lon = local_to_gps(k.x, k.y)
+                pts.append({"id": k.beacon_id, "etype": k.event_type, "prev": parent, "x": k.x, "y": k.y,
+                            "lat": lat, "lon": lon, "conf": k.aged_confidence(), "age_s": k.age_s})
             self.bus.send("gateway", "command_post", "map_update", pts)
         elif kind == "mission":
-            self.bus.send("gateway", "executor", "briefing", p)
+            self.bus.send("gateway", "executor", "briefing", p)   # p = MISSION bytes, forwarded as-is
 
 
 class CommandPost:
@@ -273,16 +216,16 @@ class CommandPost:
         if not victims:
             return
         path, cur = [], victims[0]["id"]
-        while cur in by:                                    # follow prev pointers back to the entrance
+        while cur in by:                                    # follow parent edges back to the entrance
             path.append(by[cur])
             cur = by[cur]["prev"]
         path.reverse()
         self.sim.cp_route, self.sim.cp_state = path, 2
         gas = [b["id"] for b in p if b["etype"] == GAS]
         self.sim.say(f"command post: route {[b['id'] for b in path]} to victim, hazard beacons {gas} excluded")
-        self.bus.send("command_post", "gateway", "mission", {
-            "target": victims[0]["id"], "avoid": gas,
-            "route": [{"id": b["id"], "x": b["x"], "y": b["y"]} for b in path]})
+        mission = pack_mission(VICTIM, [(b["id"], b["x"], b["y"]) for b in path])
+        self.sim.say(f"command post: mission packet = {len(mission)} bytes")
+        self.bus.send("command_post", "gateway", "mission", mission)
 
 
 class Executor(Robot):
@@ -293,26 +236,24 @@ class Executor(Robot):
 
     def on_msg(self, src, kind, p):
         if kind == "briefing":
-            self.mission = p
-            self.sim.say(f"Executor briefed at entrance: {len(p['route'])} beacons, avoid {p['avoid']}")
+            target, route = unpack_mission(p)
+            self.mission = {"target": target, "route": [{"id": i, "x": x, "y": y} for i, x, y in route]}
+            self.sim.say(f"Executor briefed at entrance: {len(route)} beacons ({len(p)} B mission packet)")
 
     def listen(self):
         for b in self.sim.beacons:
             if b["id"] in self.heard or dist(self.true, b["true"]) > RADIO:
                 continue
-            raw = bytearray(b["pkt"])
-            if self.rng.random() < 0.1:
-                raw[4] ^= 0x10                              # simulated RF bit error
-            try:
-                p = unpack(bytes(raw))
-            except ValueError:
+            if self.rng.random() < RADIO_LOSS:                  # hardware CRC failed: radio drops the frame
                 self.crc_fail += 1
                 continue
-            c = aged_conf(p, self.sim.now())
-            self.heard[b["id"]] = c
-            tag = "STALE-verify" if c < STALE else "fresh"
-            self.sim.say(f"Executor hears #{p.id} {NAMES[p.etype]} conf={c:.2f} ({tag})"
-                         + ("  HAZARD, not on route" if p.flags & F_HAZ else ""))
+            age = int(self.sim.t - b["t_drop"])                 # the beacon's own age counter
+            p = Beacon.unpack(replace(b["beacon"], age_s=age).pack())
+            c = p.aged_confidence()
+            self.heard[p.beacon_id] = c
+            tag = "STALE-verify" if c < STALE_THRESHOLD else "fresh"
+            self.sim.say(f"Executor hears #{p.beacon_id} {NAMES[p.event_type]} age={p.age_s}s conf={c:.2f} ({tag})"
+                         + ("  HAZARD, not on route" if p.event_type == GAS else ""))
 
     def run(self):
         self.sim.phase = "Executor navigating"
@@ -358,9 +299,8 @@ def run_simulation(seed=7, verbose=True, exec_delay_s=900):
     wr, ex = Writer(sim, rng, bus), Executor(sim, rng, bus)
     sim.writer, sim.executor = wr, ex
     bus.h = {"gateway": gw.on_msg, "command_post": cp.on_msg, "writer": wr.on_msg, "executor": ex.on_msg}
-    bus.send("gateway", "writer", "time_sync", {"unix": sim.t0})
     sim.writer_error = wr.run()
-    sim.t += exec_delay_s                                   # Executor is deployed later
+    sim.t += exec_delay_s                                   # Executor is deployed later (beacon age counters keep running)
     sim.say(f"--- Executor deployed {exec_delay_s // 60} min after the Writer finished ---")
     ex.run()
     sim.executor_exposure, sim.bus = ex.exposure, bus
