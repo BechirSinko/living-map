@@ -15,7 +15,7 @@ To avoid merge conflicts, Software lead edits `livingmap/` and `docs/`, and the 
 | Week | Dates | Milestone | Owner | Done when |
 |------|-------|-----------|-------|-----------|
 | 0 | to 05/10 | Phase 1 submission: repo, simulation, report, failure cases, plan | Both | Submitted before the deadline |
-| 1 | 06-12/10 | Order or collect parts; confirm the legal LoRa band in Tunisia; test airtime and range; port `beacon.py` packet to C/C++ | Embedded lead / Software lead | Parts in hand; two ESP32+LoRa nodes exchange a 16-byte packet with a valid CRC |
+| 1 | 06-12/10 | Order or collect parts; confirm the legal LoRa band in Tunisia; test airtime and range; port `beacon.py` packet to C/C++ | Embedded lead / Software lead | Parts in hand; two ESP32+LoRa nodes exchange a 15-byte beacon frame (16 B log) with the SX1276 hardware CRC |
 | 2 | 13-19/10 | Beacon firmware: periodic broadcast, jitter, battery sleep. Gateway firmware: LoRa receive and Wi-Fi/MQTT forward | Embedded lead / Software lead | Gateway forwards a beacon to the command-post software over MQTT |
 | 3 | 20-26/10 | Writer base: chassis, motors, odometry/IMU dead reckoning, obstacle sensing, corridor following | Embedded lead | Writer drives a straight and branching test track |
 | 3 | 20-26/10 | Command post: live map from MQTT, GPS conversion, mission planner, briefing message | Software lead | Map updates live from gateway test data |
@@ -45,3 +45,4 @@ Buffer: weeks 7-8 absorb slips. The riskiest items (LoRa range inside real tunne
 | Beacon-drop mechanism unreliable | Missing beacons | Simple servo-based design; test early; spacing redundancy |
 | Integration issues | Late surprises | Weekly integration test from week 2 |
 | Embedded lead unavailable | One-person bottleneck | Keep the firmware modular and documented; the simulation stays as a fallback demo |
+

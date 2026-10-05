@@ -1,4 +1,4 @@
-"""End-to-end simulation: Writer -> beacons -> gateway (ONA) -> command post -> Executor.
+﻿"""End-to-end simulation: Writer -> beacons -> gateway (ONA) -> command post -> Executor.
 
 Uses the repo packet code (livingmap/beacon.py) and frame code (livingmap/frames.py).
 """
@@ -10,7 +10,7 @@ from livingmap.beacon import (Beacon, EventType, NONE_ID, STALE_THRESHOLD,
                               pack_log, unpack_log, pack_mission, unpack_mission)
 from livingmap.frames import local_to_gps as _l2g
 
-# Beacon format = firmware/common/beacon_msg.h (14 B little-endian, age counter, no clock sync).
+# Beacon format = firmware/include/beacon_msg.h (14 B little-endian, age counter, no clock sync).
 WAYPOINT, GAS, VICTIM = EventType.NONE, EventType.GAS, EventType.VICTIM
 NAMES = {WAYPOINT: "waypoint", GAS: "GAS", VICTIM: "VICTIM"}
 NONE = NONE_ID
@@ -357,3 +357,4 @@ def animate(sim, every=3, save=None, show=True):
     if show:
         plt.show()
     plt.close(fig)
+
