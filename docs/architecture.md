@@ -1,12 +1,33 @@
-# Technical Solution and Architecture
+# System architecture
+
+```mermaid
+flowchart LR
+  subgraph INSIDE["INSIDE: GPS-denied tunnel"]
+    W["Writer robot<br/>explore + sense + drop"]
+    B["Beacon chain<br/>B1 -> B2 -> ... -> Bn<br/>(LoRa broadcast, aging)"]
+    E["Executor robot<br/>beacon-guided navigation"]
+  end
+  subgraph ONA["OUTSIDE NETWORK AREA (tunnel entrance)"]
+    GW["LoRa gateway (ESP32 + SX1276)"]
+    FT["Frame translation<br/>local x,y -> lat,lon"]
+  end
+  CP["COMMAND POST<br/>live map + mission planner"]
+  W -- "drops beacons" --> B
+  W -- "LOG upload (LoRa)" --> GW
+  B -- "RF broadcast" --> E
+  GW --> FT
+  FT -- "Wi-Fi/MQTT (satellite in real use)" --> CP
+  CP -- "mission" --> GW
+  GW -- "briefing before entry (LoRa)" --> E
+```
+
+Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
+The simulation bus raises `PermissionError` if a robot tries to talk to the command post directly.
 
 ## Zones
 - **Inside (tunnel):** Writer, beacon chain, Executor. No GPS, no network.
 - **Outside Network Area (ONA):** ESP32 + LoRa gateway at the entrance. Receives, translates to GPS, forwards.
 - **Command post:** laptop with live map and mission planner.
-
-## Diagram
-See the Mermaid diagram in the root `README.md`. Export a PNG to `docs/diagrams/` for the report.
 
 ## Component responsibilities
 | Component | Responsibility | Tech (proposed) |
