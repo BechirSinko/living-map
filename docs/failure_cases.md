@@ -1,3 +1,21 @@
-# Failure cases
+﻿# Failure Cases
 
-TODO
+Design principle: **memory lives in the beacons, not in the robots**, and every link in the chain has a degraded mode. "Sim" marks cases demonstrated in `livingmap/sim.py`.
+
+| # | Failure | Effect | Detection | Mitigation / degraded mode | Sim |
+|---|---------|--------|-----------|----------------------------|-----|
+| 1 | **Writer dies or is stuck** (battery, jam, rockfall) | Log never uploaded | Gateway receives no upload before a timeout; Writer stops broadcasting position | Beacons already hold the map. The Executor rebuilds the route by following `prev` pointers from the last beacon back to the entrance. Command post marks the unexplored area as unknown. | Route is derived from `prev` pointers |
+| 2 | **Low battery on Writer** | Mission cut short | Battery threshold (e.g. 30 %) | Writer stops exploring, returns to the entrance and uploads. The return trip is budgeted at the explore distance plus a margin. | - |
+| 3 | **A beacon is lost, destroyed or dead** | Gap in the chain | Executor reaches the expected position and hears nothing within range; `prev` chain has a missing ID | Executor dead-reckons toward the next known beacon, using the coordinates from its briefing. It stops after a bounded search and reports "chain broken". Waypoints every N m limit the gap size. | - |
+| 4 | **Beacon battery runs out** | Silent beacon | Same as #3 | Low-duty broadcast (about every 5 s) and a battery-sized lifetime target. Aging already lowers trust over time. | - |
+| 5 | **RF collisions / interference** (many beacons in range, tunnel multipath, jamming) | Lost or garbled packets | CRC-16 mismatch; missing sequence of IDs | Randomised broadcast jitter, short airtime, retry on next broadcast. The Executor only needs one clean copy per beacon. | CRC corruption injected at 10 %; Executor retries |
+| 6 | **Bit errors / corrupted packet** | Wrong position or type | CRC-16/CCITT-FALSE on bytes 0..13 | Packet dropped, never trusted. The gateway also drops bad packets. | Yes |
+| 7 | **Stale information** (gas dispersed, victim moved) | Executor acts on old data | Confidence ages as `c0 * 0.5^(age/half_life)`; below 0.25 marked "verify before trusting" | Executor re-senses locally. Hazard beacons are still avoided but flagged stale at the command post. | Gas beacon shown at 0.24 after 15 min |
+| 8 | **Dead-reckoning drift** (wheel slip, heading bias) | Beacon coordinates are wrong in the local frame | Mismatch when the Executor reaches a beacon | Executor re-anchors to beacon coordinates at every beacon, so error does not accumulate. Beacon spacing bounds the worst case. | Drift 1.4 m; corrections logged |
+| 9 | **Bad GPS anchor or heading** (entrance GPS error, wrong compass bearing) | Whole map shifted or rotated on the command-post map. 1 degree is about 1.7 m per 100 m. | Cross-check with known landmarks, repeated GPS fixes, comparison of two surveys | Average several GPS fixes at the entrance. Anchor is surveyed, not guessed. Robots never use GPS, so navigation is unaffected; only the displayed map is. | - |
+| 10 | **Writer clock not synced** | Wrong timestamps, wrong aging | Timestamp far from gateway time at upload | Time sync from the gateway at the entrance. The gateway can re-time-stamp using the receive time. | `time_sync` message |
+| 11 | **Gateway down or Wi-Fi/MQTT link lost** | Command post blind, Executor not briefed | Heartbeat timeout at the command post | Gateway buffers uploads and retries. Backup uplink (satellite or cellular). Executor can still be briefed locally with a stored mission. | - |
+| 12 | **Direct robot-to-command-post link attempted** | Rule violation | Message bus | Forbidden by design: the simulation bus raises `PermissionError`. | Tested |
+| 13 | **Gas or hazard blocks the only route** | No safe path to the victim | Planner finds no path avoiding hazard beacons | Command post reports "no safe route" and waits or requests re-survey. The Executor never enters a hazard zone by default. | Gas edge avoided via bypass |
+| 14 | **Executor drifts off the corridor or gets lost** | Misses beacons | No beacon heard within expected distance | Stop, back-track to the last confirmed beacon, retry. Abort after a bounded number of tries. | - |
+| 15 | **Wrong or duplicate beacon ID** | Confusing route | Duplicate IDs in the log | IDs assigned sequentially by the Writer and checked at the gateway. Chain consistency check. | - |
