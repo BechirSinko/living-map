@@ -41,3 +41,16 @@ flowchart LR
 ```
 
 Rule: no direct link between any robot and the command post. Everything passes through the Outside Network Area.
+
+## Repository layout
+
+| Path | Content |
+|---|---|
+...
+## Team
+
+- TODO: names, roles, IEEE/RAS/AESS memberships
+
+## License
+
+MIT
