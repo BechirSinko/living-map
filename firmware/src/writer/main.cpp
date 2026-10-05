@@ -9,6 +9,11 @@
 #define LORA_DIO1 33
 #define SERVO_PIN 18
 
+// Set to the ID of the last beacon the Writer will drop.
+// Left at 0xFF: the Writer does not know the mission length.
+// nextHopId is a fallback; real navigation comes from the MISSION briefing.
+#define LAST_BEACON_ID  0xFF
+
 SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
 Servo dropServo;
 
@@ -23,13 +28,20 @@ static void dropBeacon(uint8_t eventType) {
   delay(500);
   dropServo.write(0);
 
+  // nextHopId = the next beacon in drop order.
+  // 0xFF if this is the last beacon (chain terminator).
+  uint8_t nextHop = (uint8_t)(nextBeaconId + 1);
+  if (LAST_BEACON_ID != 0xFF && nextBeaconId == LAST_BEACON_ID) {
+    nextHop = 0xFF;
+  }
+
   BeaconMsg m = {
-    1,
-    nextBeaconId,
-    eventType,
-    prevBeaconId,
+    1,             // version
+    nextBeaconId,  // beaconId
+    eventType,     // eventType
+    nextHop,       // nextHopId  <-- forward pointer, not the parent
     x_cm, y_cm, headingDeg,
-    0
+    0              // ageAtWriteS (beacon re-stamps at each TX)
   };
 
   uint8_t frame[1 + sizeof(BeaconMsg)];
@@ -37,9 +49,10 @@ static void dropBeacon(uint8_t eventType) {
   memcpy(&frame[1], &m, sizeof(BeaconMsg));
 
   int st = radio.transmit(frame, sizeof(frame));
-  Serial.printf("Dropped beacon %u evt=%u parent=%u status=%d\n",
-                nextBeaconId, eventType, prevBeaconId, st);
+  Serial.printf("Dropped beacon %u evt=%u next=%u status=%d\n",
+                nextBeaconId, eventType, nextHop, st);
 
+  // LOG frame keeps the parent (the beacon it was reached from).
   LogMsg lm;
   lm.b = m;
   lm.parentId = prevBeaconId;

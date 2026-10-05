@@ -14,16 +14,19 @@ SX1276 radio = new Module(LORA_CS, LORA_DIO0, LORA_RST, LORA_DIO1);
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
 
-// HEADING_DEG = compass bearing of the local +x axis, clockwise from true north.
-// Same maths as livingmap/frames.py (tested): E = x sin(psi) - y cos(psi), N = x cos(psi) + y sin(psi).
+// Local tunnel frame (x,y metres) -> WGS-84 lat/lon degrees.
+// psi = compass bearing of +x axis, clockwise from north.
+// Matches livingmap/frames.py.
 static void localToLatLon(double x_m, double y_m,
                           double& lat, double& lon) {
   double psi = HEADING_DEG * PI / 180.0;
   double east  = x_m * sin(psi) - y_m * cos(psi);
   double north = x_m * cos(psi) + y_m * sin(psi);
-  double phi = LAT0_DEG * PI / 180.0;
-  double mLat = 111132.92 - 559.82 * cos(2 * phi) + 1.175 * cos(4 * phi);
-  double mLon = 111412.84 * cos(phi) - 93.5 * cos(3 * phi);
+
+  double phi  = LAT0_DEG * PI / 180.0;
+  double mLat = 111132.92 - 559.82 * cos(2.0 * phi) + 1.175 * cos(4.0 * phi);
+  double mLon = 111412.84 * cos(phi) - 93.5 * cos(3.0 * phi);
+
   lat = LAT0_DEG + north / mLat;
   lon = LON0_DEG + east  / mLon;
 }
