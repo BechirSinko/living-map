@@ -1,4 +1,4 @@
-# The Living Map: Spatial Memory for Emergency Robots
+﻿# The Living Map: Spatial Memory for Emergency Robots
 
 TSYP14 Technical Challenge (IEEE RAS x IEEE AESS, Tunisia Section Chapters)
 
@@ -49,7 +49,8 @@ Rule: no direct link between any robot and the command post. Everything passes t
 ...
 ## Team
 
-- TODO: names, roles, IEEE/RAS/AESS memberships
+- Team **Winek?**: software lead + embedded lead
+- Memberships: TODO (counts only)
 
 ## License
 

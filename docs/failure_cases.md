@@ -4,7 +4,7 @@ Design principle: **memory lives in the beacons, not in the robots**, and every 
 
 | # | Failure | Effect | Detection | Mitigation / degraded mode | Sim |
 |---|---------|--------|-----------|----------------------------|-----|
-| 1 | **Writer dies or is stuck** (battery, jam, rockfall) | Log never uploaded | Gateway receives no upload before a timeout; Writer stops broadcasting position | Beacons already hold the map. The Executor rebuilds the route by following `prev` pointers from the last beacon back to the entrance. Command post marks the unexplored area as unknown. | Route is derived from `prev` pointers |
+| 1 | **Writer dies or is stuck** (battery, jam, rockfall) | Log never uploaded | Gateway receives no upload before a timeout; Writer stops broadcasting position | Beacons already hold the map. The Executor follows next-hop pointers inward from the first beacon, so it needs no log. Command post marks the unexplored area as unknown. | Route is derived from `prev` pointers |
 | 2 | **Low battery on Writer** | Mission cut short | Battery threshold (e.g. 30 %) | Writer stops exploring, returns to the entrance and uploads. The return trip is budgeted at the explore distance plus a margin. | - |
 | 3 | **A beacon is lost, destroyed or dead** | Gap in the chain | Executor reaches the expected position and hears nothing within range; `prev` chain has a missing ID | Executor dead-reckons toward the next known beacon, using the coordinates from its briefing. It stops after a bounded search and reports "chain broken". Waypoints every N m limit the gap size. | - |
 | 4 | **Beacon battery runs out** | Silent beacon | Same as #3 | Low-duty broadcast (about every 5 s) and a battery-sized lifetime target. Aging already lowers trust over time. | - |
@@ -19,3 +19,5 @@ Design principle: **memory lives in the beacons, not in the robots**, and every 
 | 13 | **Gas or hazard blocks the only route** | No safe path to the victim | Planner finds no path avoiding hazard beacons | Command post reports "no safe route" and waits or requests re-survey. The Executor never enters a hazard zone by default. | Gas edge avoided via bypass |
 | 14 | **Executor drifts off the corridor or gets lost** | Misses beacons | No beacon heard within expected distance | Stop, back-track to the last confirmed beacon, retry. Abort after a bounded number of tries. | - |
 | 15 | **Wrong or duplicate beacon ID** | Confusing route | Duplicate IDs in the log | IDs assigned sequentially by the Writer and checked at the gateway. Chain consistency check. | - |
+
+
